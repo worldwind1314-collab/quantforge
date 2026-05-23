@@ -1,0 +1,46 @@
+name: Deploy to Alibaba Cloud
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Prepare SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/deploy_key
+          chmod 600 ~/.ssh/deploy_key
+
+      - name: Package and upload
+        run: |
+          tar -czf deploy.tar.gz \
+            --exclude='backend/venv' \
+            --exclude='.git' \
+            --exclude='.github' \
+            backend \
+            scripts
+          scp -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key \
+            deploy.tar.gz root@${{ secrets.SSH_HOST }}:/tmp/
+
+      - name: Extract and restart
+        run: |
+          ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key \
+            root@${{ secrets.SSH_HOST }} "
+            mkdir -p /var/www/quantforge
+            cd /var/www/quantforge
+            tar -xzf /tmp/deploy.tar.gz
+            rm /tmp/deploy.tar.gz
+            cd backend
+            python3 -m venv venv 2>/dev/null || true
+            venv/bin/pip install -r requirements.txt -q 2>&1 | tail -1
+            systemctl restart quantforge-api
+            sleep 2
+            systemctl is-active quantforge-api
+            echo Deploy completed at \$(date)
+          "

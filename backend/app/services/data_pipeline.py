@@ -179,6 +179,34 @@ class DataPipeline:
         finally:
             db.close()
 
+    # ── Incremental sync ───────────────────────────────────────────
+
+    @staticmethod
+    def incremental_sync(lookback_days: int = 7) -> dict:
+        """Daily-use: sync stock list + fetch only the last N trading days.
+
+        Much faster than full_sync — suitable for cron daily runs.
+        """
+        from datetime import date, timedelta
+
+        db = SessionLocal()
+        try:
+            stock_count = DataPipeline.sync_stock_list(db)
+            codes = [r[0] for r in db.query(Stock.code).all()]
+
+            end_date = date.today().strftime("%Y%m%d")
+            start_date = (date.today() - timedelta(days=lookback_days + 3)).strftime("%Y%m%d")
+
+            quotes_data = DataPipeline.fetch_daily_quotes(codes, start_date, end_date)
+            quote_count = DataPipeline.save_daily_quotes(quotes_data, db)
+            return {
+                "stocks_synced": stock_count,
+                "quotes_saved": quote_count,
+                "stocks_with_data": len(quotes_data),
+            }
+        finally:
+            db.close()
+
 
 def _safe_float(val) -> float | None:
     """Convert value to float, return None on failure."""

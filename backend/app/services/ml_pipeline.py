@@ -114,7 +114,7 @@ class MLPipeline:
                 logger.debug(f"No factor data for {date_str}: {e}")
             current -= timedelta(days=7)
 
-        if len(all_data) < 50:
+        if len(all_data) < 20:
             raise ValueError(f"Not enough training samples: {len(all_data)}")
 
         df = pd.DataFrame(all_data)
@@ -135,7 +135,7 @@ class MLPipeline:
                 ])
                 labels.append(forward_ret)
 
-        if len(features) < 50:
+        if len(features) < 20:
             raise ValueError(f"Not enough training samples: {len(features)}")
 
         y = np.array(labels)
@@ -159,9 +159,13 @@ class MLPipeline:
 
         import xgboost as xgb
 
+        # Adjust model complexity to dataset size
+        n_est = min(200, max(50, len(X_train) // 2))
+        max_d = min(5, max(2, len(X_train) // 40))
+
         self._model = xgb.XGBRegressor(
-            n_estimators=200,
-            max_depth=5,
+            n_estimators=n_est,
+            max_depth=max_d,
             learning_rate=0.05,
             subsample=0.8,
             colsample_bytree=0.8,

@@ -99,3 +99,31 @@ def get_latest_quote(code: str, db: Session = Depends(get_db)):
             "turnover": row.turnover,
         },
     }
+
+
+@router.post("/sync")
+def trigger_sync(
+    codes: str | None = Query(None, description="股票代码逗号分隔，不传则同步全部"),
+    days: int = Query(730, description="同步天数回溯"),
+    db: Session = Depends(get_db),
+):
+    """触发数据同步：同步指定股票的日线行情。"""
+    from ..services.data_pipeline import DataPipeline
+    from datetime import date, timedelta
+
+    if codes:
+        code_list = [c.strip() for c in codes.split(",") if c.strip()]
+    else:
+        code_list = [r[0] for r in db.query(Stock.code).filter(Stock.is_active == True).all()]
+
+    end_date = date.today().strftime("%Y%m%d")
+    start_date = (date.today() - timedelta(days=days)).strftime("%Y%m%d")
+
+    quotes_data = DataPipeline.fetch_daily_quotes(code_list, start_date, end_date)
+    quote_count = DataPipeline.save_daily_quotes(quotes_data, db)
+
+    return {
+        "stocks_fetched": len(quotes_data),
+        "total_quotes_saved": quote_count,
+        "date_range": f"{start_date} ~ {end_date}",
+    }

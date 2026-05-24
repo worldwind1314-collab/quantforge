@@ -279,34 +279,26 @@ def debug_connectivity():
     try:
         import akshare as ak
         fin_results["akshare_version"] = ak.__version__
+
+        # Test stock_financial_abstract with full indicator list
+        try:
+            df = ak.stock_financial_abstract(symbol="000001")
+            if df is not None and not df.empty:
+                indicators = df["指标"].tolist()
+                fin_results["stock_financial_abstract"] = {
+                    "ok": True, "rows": len(df),
+                    "indicators": indicators,
+                    "latest_period": [c for c in df.columns if c not in ["选项", "指标"]][:2],
+                }
+        except Exception as e:
+            fin_results["stock_financial_abstract"] = {"ok": False, "error": str(e)[:200]}
+
         for code in ["000001", "600519"]:
             try:
                 df = ak.stock_financial_analysis_indicator(symbol=code, start_year="2023")
-                fin_results[f"financial_{code}"] = {"ok": True, "rows": len(df) if df is not None else 0}
+                fin_results[f"financial_old_{code}"] = {"ok": True, "rows": len(df) if df is not None else 0}
             except Exception as e:
-                fin_results[f"financial_{code}"] = {"ok": False, "error": type(e).__name__ + ": " + str(e)[:150]}
-
-        # Test alternative financial data functions
-        for func_name in ["stock_financial_abstract", "stock_financial_report_sina", "stock_financial_benefit"]:
-            try:
-                fn = getattr(ak, func_name, None)
-                if fn is None:
-                    fin_results[func_name] = "not found"
-                else:
-                    try:
-                        df = fn(symbol="000001")
-                        if df is not None and not df.empty:
-                            fin_results[func_name] = {
-                                "ok": True, "rows": len(df),
-                                "columns": list(df.columns),
-                                "first_row": {str(k): str(v)[:80] for k, v in df.iloc[0].items()},
-                            }
-                        else:
-                            fin_results[func_name] = {"ok": True, "rows": 0}
-                    except Exception as e2:
-                        fin_results[func_name] = {"ok": False, "error": type(e2).__name__ + ": " + str(e2)[:120]}
-            except Exception as e:
-                fin_results[func_name] = {"error": str(e)[:100]}
+                fin_results[f"financial_old_{code}"] = {"ok": False, "error": type(e).__name__ + ": " + str(e)[:150]}
     except ImportError:
         fin_results["import"] = "akshare not installed"
 

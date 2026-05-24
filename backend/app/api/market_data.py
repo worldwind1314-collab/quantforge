@@ -274,7 +274,21 @@ def debug_connectivity():
     except ImportError:
         ak_results["import"] = "akshare not installed"
 
+    # Test financial indicator API
+    fin_results = {}
+    try:
+        import akshare as ak
+        for code in ["000001", "600519"]:
+            try:
+                df = ak.stock_financial_analysis_indicator(symbol=code, start_year="2023")
+                fin_results[f"financial_{code}"] = {"ok": True, "rows": len(df) if df is not None else 0}
+            except Exception as e:
+                fin_results[f"financial_{code}"] = {"ok": False, "error": type(e).__name__ + ": " + str(e)[:150]}
+    except ImportError:
+        fin_results["import"] = "akshare not installed"
+
     return {
         "connectivity": results,
         "akshare_alternatives": ak_results,
+        "financial_indicators": fin_results,
     }

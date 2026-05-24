@@ -192,8 +192,8 @@ class DataPipeline:
         try:
             df = ak.stock_financial_analysis_indicator(symbol=code, start_year="2023")
             return df
-        except Exception:
-            logger.debug(f"Failed to fetch financial indicators for {code}")
+        except Exception as e:
+            logger.warning(f"Failed to fetch financial indicators for {code}: {e}")
             return None
 
     @staticmethod

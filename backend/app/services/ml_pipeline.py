@@ -101,13 +101,18 @@ class MLPipeline:
 
         logger.info(f"Built DataFrames for {len(price_data)} stocks")
 
-        # Bi-weekly snapshots (14 days) to reduce computation
-        snapshot_dates = []
-        current = date.fromisoformat(end_date)
-        start = date.fromisoformat(start_date)
-        while current >= start:
-            snapshot_dates.append(current.isoformat())
-            current -= timedelta(days=14)
+        # Collect all unique trading dates from price data within the training range
+        all_trading_dates = set()
+        for df in price_data.values():
+            all_trading_dates.update(df.index.tolist())
+        trading_dates = sorted(
+            d for d in all_trading_dates
+            if start_date <= d <= end_date
+        )
+        # Take every 10th trading day (approximately bi-weekly)
+        snapshot_dates = trading_dates[::10]
+        if not snapshot_dates:
+            raise ValueError("No trading dates found in training range")
 
         logger.info(f"Computing factors for {len(snapshot_dates)} snapshots...")
 

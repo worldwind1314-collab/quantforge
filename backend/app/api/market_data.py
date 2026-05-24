@@ -201,10 +201,12 @@ def debug_connectivity():
         except Exception as e:
             results[name] = {"status": "error", "error": type(e).__name__, "msg": str(e)[:150]}
 
-    # Also test AKShare alternative functions
+    # Test more AKShare alternative functions
     ak_results = {}
     try:
         import akshare as ak
+        from datetime import date, timedelta
+
         # Test stock list (working)
         try:
             df = ak.stock_info_a_code_name()
@@ -212,27 +214,27 @@ def debug_connectivity():
         except Exception as e:
             ak_results["stock_info_a_code_name"] = {"ok": False, "error": str(e)[:200]}
 
-        # Test index daily (working)
+        # Test index daily — Sina API (working)
         try:
             df = ak.stock_zh_index_daily(symbol="sh000001")
             ak_results["stock_zh_index_daily"] = {"ok": True, "rows": len(df)}
         except Exception as e:
             ak_results["stock_zh_index_daily"] = {"ok": False, "error": str(e)[:200]}
 
-        # Test stock_zh_a_hist with different parameters / symbol format
-        for symbol in ["000001", "sz000001", "sh600519"]:
+        # Test stock_zh_a_hist with different symbol formats
+        for symbol in ["000001", "sz000001"]:
             try:
                 df = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date="20260501", end_date="20260524", adjust="qfq")
-                ak_results[f"stock_zh_a_hist_{symbol}"] = {"ok": True, "rows": len(df) if df is not None else 0}
+                ak_results[f"stock_zh_a_hist_{symbol}"] = {"ok": True, "rows": len(df)}
             except Exception as e:
-                ak_results[f"stock_zh_a_hist_{symbol}"] = {"ok": False, "error": type(e).__name__ + ": " + str(e)[:150]}
+                ak_results[f"stock_zh_a_hist_{symbol}"] = {"ok": False, "error": type(e).__name__ + ": " + str(e)[:120]}
 
-        # Test alternative: stock_zh_a_spot_em (spot data)
+        # Test Sina-based individual stock hist (may use different endpoint)
         try:
-            df = ak.stock_zh_a_spot_em()
-            ak_results["stock_zh_a_spot_em"] = {"ok": True, "rows": len(df) if df is not None else 0}
+            df = ak.stock_zh_a_daily(symbol="sz000001", start_date="20260501", end_date="20260524", adjust="qfq")
+            ak_results["stock_zh_a_daily_sz000001"] = {"ok": True, "rows": len(df)}
         except Exception as e:
-            ak_results["stock_zh_a_spot_em"] = {"ok": False, "error": str(e)[:200]}
+            ak_results["stock_zh_a_daily_sz000001"] = {"ok": False, "error": type(e).__name__ + ": " + str(e)[:120]}
 
         # Test market PE (working)
         try:
@@ -240,6 +242,29 @@ def debug_connectivity():
             ak_results["stock_market_pe_lg"] = {"ok": True, "rows": len(df) if df is not None else 0}
         except Exception as e:
             ak_results["stock_market_pe_lg"] = {"ok": False, "error": str(e)[:200]}
+
+        # Test spot (batch real-time data)
+        try:
+            df = ak.stock_zh_a_spot_em()
+            ak_results["stock_zh_a_spot_em"] = {"ok": True, "rows": len(df)}
+        except Exception as e:
+            ak_results["stock_zh_a_spot_em"] = {"ok": False, "error": type(e).__name__ + ": " + str(e)[:120]}
+
+        # Test Sina individual stock quote API directly
+        try:
+            import requests
+            r = requests.get("https://hq.sinajs.cn/list=sh600519,sz000001", headers={"Referer": "https://finance.sina.com.cn"}, timeout=10)
+            ak_results["sina_direct_quote"] = {"ok": r.status_code == 200, "len": len(r.text), "status": r.status_code}
+        except Exception as e:
+            ak_results["sina_direct_quote"] = {"ok": False, "error": str(e)[:120]}
+
+        # Test Tencent individual stock hist API
+        try:
+            import requests
+            r = requests.get("https://web.ifzq.gtimg.cn/appstock/app/fqkline/get?param=sz000001,day,,,10,qfq", timeout=10)
+            ak_results["tencent_kline"] = {"ok": r.status_code == 200, "len": len(r.text)}
+        except Exception as e:
+            ak_results["tencent_kline"] = {"ok": False, "error": str(e)[:120]}
 
     except ImportError:
         ak_results["import"] = "akshare not installed"

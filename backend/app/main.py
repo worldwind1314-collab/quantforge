@@ -5,10 +5,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import market_data
+from .api import market_data, trading
 from .core.config import settings
 from .core.database import Base, engine
-from .models import DailyQuote, Stock  # noqa: F401 ensure models registered
+from .models import DailyQuote, Stock, PaperAccount, PaperPosition, PaperOrder, BacktestResult  # noqa: F401
 
 
 @asynccontextmanager
@@ -33,6 +33,7 @@ app.add_middleware(
 )
 
 app.include_router(market_data.router, prefix="/api")
+app.include_router(trading.router, prefix="/api")
 
 
 @app.get("/api/health")

@@ -35,8 +35,8 @@
     </div>
     <div class="stat-card">
         <div class="label">最新模型 IC</div>
-        <div class="value" style="color: {% if stats.latest_ic and stats.latest_ic > 0 %}var(--green){% else %}var(--red){% endif %}">
-            {{ "%.4f" % stats.latest_ic if stats.latest_ic is not none else 'N/A' }}
+        <div class="value" style="color: {% if latest_ic and latest_ic > 0 %}var(--green){% else %}var(--red){% endif %}">
+            {{ "%.4f" % latest_ic if latest_ic is not none else 'N/A' }}
         </div>
         <div class="sub">Spearman Rank IC</div>
     </div>

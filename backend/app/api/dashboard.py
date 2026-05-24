@@ -202,18 +202,32 @@ def predictions_page(request: Request, db: Session = Depends(get_db)):
         total = len(preds)
 
         stock_map = {}
+        fs_map = {}
         if preds:
             codes = list(set(p.code for p in preds))
             stocks = db.query(Stock).filter(Stock.code.in_(codes)).all()
             stock_map = {s.code: s.name for s in stocks}
+            # Join factor scores
+            fs_rows = (
+                db.query(FactorScore)
+                .filter(FactorScore.trade_date == latest_date, FactorScore.code.in_(codes))
+                .all()
+            )
+            fs_map = {f.code: f for f in fs_rows}
 
         for p in preds:
+            fs = fs_map.get(p.code)
             predictions.append({
                 "code": p.code,
                 "name": stock_map.get(p.code, ""),
                 "predicted_return": p.predicted_return,
                 "prediction_rank": p.prediction_rank,
                 "confidence": p.confidence,
+                "value_score": fs.value_score if fs else None,
+                "quality_score": fs.quality_score if fs else None,
+                "momentum_score": fs.momentum_score if fs else None,
+                "volatility_score": fs.volatility_score if fs else None,
+                "composite_score": fs.composite_score if fs else None,
             })
 
         # Factor means for top/bottom 10

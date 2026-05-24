@@ -108,72 +108,10 @@ print(f'FACTOR_COUNT={count}')
 
 log "Step 2/4: Done."
 
-# ── Step 3: ML 模型训练 ──
-log "Step 3/4: ML training..."
+# ── Step 3+4: ML 训练 + 预测 (combined to share model in memory) ──
+log "Step 3/4: ML training + prediction..."
 
-$VENV_PYTHON -c "
-import sys, logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
-logger = logging.getLogger('ml')
-
-sys.path.insert(0, '.')
-from app.core.database import SessionLocal
-from app.services.ml_pipeline import MLPipeline
-
-db = SessionLocal()
-pipeline = MLPipeline(db)
-
-from datetime import date
-end_date = date.today().isoformat()
-start_date = date.today().replace(year=date.today().year - 2).isoformat()
-
-logger.info(f'Training model: {start_date} ~ {end_date}')
-try:
-    metrics = pipeline.train(start_date, end_date)
-    logger.info(f'Train metrics: samples={metrics.get(\"train_samples\")}, val_ic={metrics.get(\"val_ic\", \"N/A\")}')
-    print(f'TRAIN_SAMPLES={metrics.get(\"train_samples\")}')
-    print(f'VAL_IC={metrics.get(\"val_ic\", \"N/A\")}')
-    print(f'FEATURE_IMPORTANCE={metrics.get(\"feature_importance\", {})}')
-except Exception as e:
-    logger.error(f'Training failed: {e}', exc_info=True)
-    sys.exit(1)
-finally:
-    db.close()
-" >> "$LOG_FILE" 2>&1
+$VENV_PYTHON "$WORKDIR/../scripts/train_and_predict.py" >> "$LOG_FILE" 2>&1
 
 log "Step 3/4: Done."
-
-# ── Step 4: ML 预测生成 ──
-log "Step 4/4: ML prediction..."
-
-$VENV_PYTHON -c "
-import sys, logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(message)s')
-logger = logging.getLogger('predict')
-
-sys.path.insert(0, '.')
-from app.core.database import SessionLocal
-from app.services.ml_pipeline import MLPipeline
-from app.models.market import DailyQuote
-from sqlalchemy import func
-
-db = SessionLocal()
-pipeline = MLPipeline(db)
-
-# Get latest trading date
-latest_date = db.query(func.max(DailyQuote.trade_date)).scalar()
-logger.info(f'Generating predictions for {latest_date}')
-
-try:
-    predictions = pipeline.predict(latest_date, top_n=100)
-    logger.info(f'Generated {len(predictions)} predictions')
-    print(f'PREDICT_DATE={latest_date}')
-    print(f'PREDICT_COUNT={len(predictions)}')
-except Exception as e:
-    logger.error(f'Prediction failed: {e}', exc_info=True)
-finally:
-    db.close()
-" >> "$LOG_FILE" 2>&1
-
-log "Step 4/4: Done."
 log "========== Pipeline Complete =========="

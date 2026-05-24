@@ -50,7 +50,9 @@ class MLPipeline:
             .all()
         )
 
-        if len(factors) >= 100:
+        # Need enough samples AND enough distinct dates to capture temporal patterns
+        distinct_dates = len({f.trade_date for f in factors})
+        if len(factors) >= 100 and distinct_dates >= 10:
             return self._build_from_factors(db, factors)
 
         # Fallback: compute factors from daily_quotes for a subset of dates
@@ -95,7 +97,7 @@ class MLPipeline:
         while current >= start:
             date_str = current.isoformat()
             try:
-                factors = engine.compute_all_factors(date_str)
+                factors = engine.compute_all_factors(date_str, codes=codes)
                 engine.save_factors(factors, date_str, db)
                 for code, row in factors.iterrows():
                     if row.get("composite_score") is None:

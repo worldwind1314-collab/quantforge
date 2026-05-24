@@ -26,11 +26,13 @@ class FactorEngine:
 
     # ── Factor computation ─────────────────────────────────────────
 
-    def compute_all_factors(self, trade_date: str) -> pd.DataFrame:
-        """Compute all factors for all stocks on a given date. Returns DataFrame indexed by code."""
+    def compute_all_factors(self, trade_date: str, codes: list[str] | None = None) -> pd.DataFrame:
+        """Compute all factors for stocks on a given date. If codes is None, processes all active stocks.
+        Returns DataFrame indexed by code."""
         db = self._get_db()
 
-        codes = [r[0] for r in db.query(Stock.code).filter(Stock.is_active == True).all()]
+        if codes is None:
+            codes = [r[0] for r in db.query(Stock.code).filter(Stock.is_active == True).all()]
 
         factors = {
             "code": [],

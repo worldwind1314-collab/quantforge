@@ -171,3 +171,65 @@ def debug_akshare(code: str):
             "error_type": type(e).__name__,
             "traceback": traceback.format_exc(),
         }
+
+
+@router.get("/debug/connectivity")
+def debug_connectivity():
+    """Test connectivity to various financial data sources from the server."""
+    import traceback
+    import requests
+
+    results = {}
+    session = requests.Session()
+    session.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"})
+
+    tests = {
+        "eastmoney_quote": "https://push2.eastmoney.com/api/qt/stock/get?secid=1.000001&fields=f43",
+        "eastmoney_hist": "https://datacenter-web.eastmoney.com/api/data/v1/get?reportName=RPT_DAILY_BILLBOARD",
+        "sina_finance": "https://hq.sinajs.cn/list=sh000001",
+        "netease_finance": "https://api.money.126.net/data/feed/0000001",
+        "tencent_finance": "https://qt.gtimg.cn/q=sh000001",
+        "eastmoney_www": "https://www.eastmoney.com",
+        "sina_www": "https://www.sina.com.cn",
+        "baidu": "https://www.baidu.com",
+    }
+
+    for name, url in tests.items():
+        try:
+            r = session.get(url, timeout=10)
+            results[name] = {"status": r.status_code, "len": len(r.text), "ok": r.ok}
+        except Exception as e:
+            results[name] = {"status": "error", "error": type(e).__name__, "msg": str(e)[:150]}
+
+    # Also test AKShare alternative functions
+    ak_results = {}
+    try:
+        import akshare as ak
+        # Test silver/commodity data (different API endpoint)
+        try:
+            df = ak.stock_info_a_code_name()
+            ak_results["stock_info_a_code_name"] = {"ok": True, "rows": len(df)}
+        except Exception as e:
+            ak_results["stock_info_a_code_name"] = {"ok": False, "error": str(e)[:200]}
+
+        # Test an API that doesn't hit East Money
+        try:
+            df = ak.stock_zh_index_daily(symbol="sh000001")
+            ak_results["stock_zh_index_daily"] = {"ok": True, "rows": len(df)}
+        except Exception as e:
+            ak_results["stock_zh_index_daily"] = {"ok": False, "error": str(e)[:200]}
+
+        # Test fund flow (another API)
+        try:
+            df = ak.stock_market_pe_lg()
+            ak_results["stock_market_pe_lg"] = {"ok": True, "rows": len(df) if df is not None else 0}
+        except Exception as e:
+            ak_results["stock_market_pe_lg"] = {"ok": False, "error": str(e)[:200]}
+
+    except ImportError:
+        ak_results["import"] = "akshare not installed"
+
+    return {
+        "connectivity": results,
+        "akshare_alternatives": ak_results,
+    }

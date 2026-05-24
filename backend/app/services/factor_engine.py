@@ -57,8 +57,15 @@ class FactorEngine:
             df = price_data[code]
             factors["code"].append(code)
 
+            # Get current price for PE/PB/PS computation
+            current_price = None
+            if trade_date in df.index:
+                current_price = df.loc[trade_date, "close"]
+                if pd.isna(current_price):
+                    current_price = None
+
             # Value: negative PE/PB → higher score (cheaper)
-            value = self._value_factor(code, trade_date)
+            value = self._value_factor(code, trade_date, current_price)
             factors["value_score"].append(value)
 
             # Quality: ROE + margin + growth
@@ -93,8 +100,8 @@ class FactorEngine:
 
     # ── Individual factors ─────────────────────────────────────────
 
-    def _value_factor(self, code: str, trade_date: str) -> float | None:
-        """Lower PE/PB → higher value score. Negative score for negative PE."""
+    def _value_factor(self, code: str, trade_date: str, current_price: float | None = None) -> float | None:
+        """Lower PE/PB/PS → higher value score. Computes PE/PB/PS from per-share data if needed."""
         db = self._get_db()
         from ..models.finance import FinancialIndicator
 
@@ -107,17 +114,30 @@ class FactorEngine:
         if not fi:
             return None
 
+        # Get PE/PB/PS: use stored values, or compute from per-share data + price
+        pe = fi.pe
+        pb = fi.pb
+        ps = fi.ps
+
+        if current_price and current_price > 0:
+            if pe is None and fi.eps and fi.eps > 0:
+                pe = current_price / fi.eps
+            if pb is None and fi.bv_per_share and fi.bv_per_share > 0:
+                pb = current_price / fi.bv_per_share
+            if ps is None and fi.revenue_per_share and fi.revenue_per_share > 0:
+                ps = current_price / fi.revenue_per_share
+
         score = 0.0
         w = 0
 
-        if fi.pe and fi.pe > 0:
-            score += -fi.pe  # negative PE → positive contribution
+        if pe and pe > 0:
+            score += -pe  # negative PE → positive contribution
             w += 1
-        if fi.pb and fi.pb > 0:
-            score += -fi.pb * 10
+        if pb and pb > 0:
+            score += -pb * 10
             w += 1
-        if fi.ps and fi.ps > 0:
-            score += -fi.ps * 5
+        if ps and ps > 0:
+            score += -ps * 5
             w += 1
 
         return score / w if w > 0 else None

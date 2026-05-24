@@ -28,10 +28,12 @@ class FinancialIndicator(Base):
     profit_growth: Mapped[float | None] = mapped_column(Float, comment="净利润增长率(%)")
     asset_growth: Mapped[float | None] = mapped_column(Float, comment="总资产增长率(%)")
 
-    # Valuation
+    # Valuation (PE/PB/PS computed from per-share data * price during factor calc)
     pe: Mapped[float | None] = mapped_column(Float, comment="市盈率")
     pb: Mapped[float | None] = mapped_column(Float, comment="市净率")
     ps: Mapped[float | None] = mapped_column(Float, comment="市销率")
+    bv_per_share: Mapped[float | None] = mapped_column(Float, comment="每股净资产(元)")
+    revenue_per_share: Mapped[float | None] = mapped_column(Float, comment="每股营业收入(元)")
 
     # Asset quality
     debt_ratio: Mapped[float | None] = mapped_column(Float, comment="资产负债率(%)")

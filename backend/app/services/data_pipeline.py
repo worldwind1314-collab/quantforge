@@ -186,19 +186,78 @@ class DataPipeline:
 
     # ── Financial indicators ───────────────────────────────────────
 
+    # Mapping from indicator name in stock_financial_abstract to our field
+    _FINANCIAL_INDICATOR_MAP = {
+        "roe": ["净资产收益率(ROE)", "净资产收益率"],
+        "eps": ["基本每股收益", "摊薄每股收益_最新股数"],
+        "gross_margin": ["毛利率"],
+        "net_margin": ["销售净利率"],
+        "revenue_growth": ["营业总收入增长率"],
+        "profit_growth": ["归属母公司净利润增长率", "净利润增长率"],
+        "asset_growth": ["总资产增长率"],
+        "debt_ratio": ["资产负债率"],
+        "current_ratio": ["流动比率"],
+        "asset_turnover": ["总资产周转率"],
+        "cf_per_share": ["每股经营现金流", "每股经营活动现金流量净额"],
+        "bv_per_share": ["每股净资产"],
+        "revenue_per_share": ["每股营业收入", "每股营业总收入"],
+    }
+
     @staticmethod
-    def fetch_financial_indicators(code: str) -> pd.DataFrame | None:
-        """Fetch financial analysis indicators for a single stock."""
+    def _extract_indicator(df_abs: pd.DataFrame, names: list[str], latest_period: str) -> float | None:
+        """Extract a specific indicator value from stock_financial_abstract DataFrame."""
+        for name in names:
+            row = df_abs[df_abs["指标"] == name]
+            if not row.empty:
+                val = row.iloc[0].get(latest_period)
+                if val is not None:
+                    try:
+                        f = float(val)
+                        return None if pd.isna(f) else f
+                    except (ValueError, TypeError):
+                        continue
+        return None
+
+    @staticmethod
+    def fetch_financial_indicators(code: str) -> dict | None:
+        """Fetch financial indicators using stock_financial_abstract (Sina source).
+        Returns a dict ready for FinancialIndicator creation, or None."""
         try:
-            df = ak.stock_financial_analysis_indicator(symbol=code, start_year="2023")
-            return df
+            df = ak.stock_financial_abstract(symbol=code)
+            if df is None or df.empty:
+                return None
+
+            # Period columns are date strings like "20260331"
+            date_cols = [c for c in df.columns if c not in ["选项", "指标"] and str(c).isdigit()]
+            if not date_cols:
+                return None
+            latest_period = date_cols[0]  # First column = most recent
+
+            result = {
+                "code": code,
+                "report_date": latest_period,
+                "roe": DataPipeline._extract_indicator(df, DataPipeline._FINANCIAL_INDICATOR_MAP["roe"], latest_period),
+                "eps": DataPipeline._extract_indicator(df, DataPipeline._FINANCIAL_INDICATOR_MAP["eps"], latest_period),
+                "gross_margin": DataPipeline._extract_indicator(df, DataPipeline._FINANCIAL_INDICATOR_MAP["gross_margin"], latest_period),
+                "net_margin": DataPipeline._extract_indicator(df, DataPipeline._FINANCIAL_INDICATOR_MAP["net_margin"], latest_period),
+                "revenue_growth": DataPipeline._extract_indicator(df, DataPipeline._FINANCIAL_INDICATOR_MAP["revenue_growth"], latest_period),
+                "profit_growth": DataPipeline._extract_indicator(df, DataPipeline._FINANCIAL_INDICATOR_MAP["profit_growth"], latest_period),
+                "asset_growth": DataPipeline._extract_indicator(df, DataPipeline._FINANCIAL_INDICATOR_MAP["asset_growth"], latest_period),
+                "debt_ratio": DataPipeline._extract_indicator(df, DataPipeline._FINANCIAL_INDICATOR_MAP["debt_ratio"], latest_period),
+                "current_ratio": DataPipeline._extract_indicator(df, DataPipeline._FINANCIAL_INDICATOR_MAP["current_ratio"], latest_period),
+                "asset_turnover": DataPipeline._extract_indicator(df, DataPipeline._FINANCIAL_INDICATOR_MAP["asset_turnover"], latest_period),
+                "cf_per_share": DataPipeline._extract_indicator(df, DataPipeline._FINANCIAL_INDICATOR_MAP["cf_per_share"], latest_period),
+                "bv_per_share": DataPipeline._extract_indicator(df, DataPipeline._FINANCIAL_INDICATOR_MAP["bv_per_share"], latest_period),
+                "revenue_per_share": DataPipeline._extract_indicator(df, DataPipeline._FINANCIAL_INDICATOR_MAP["revenue_per_share"], latest_period),
+            }
+            return result
         except Exception as e:
             logger.warning(f"Failed to fetch financial indicators for {code}: {e}")
             return None
 
     @staticmethod
     def sync_financial_indicators(codes: list[str] | None = None, db: Session | None = None) -> int:
-        """Sync latest financial indicators for given stocks."""
+        """Sync latest financial indicators for given stocks using stock_financial_abstract."""
         if db is None:
             db = SessionLocal()
             close_db = True
@@ -211,15 +270,11 @@ class DataPipeline:
         try:
             count = 0
             for i, code in enumerate(codes):
-                df = DataPipeline.fetch_financial_indicators(code)
-                if df is None or df.empty:
+                data = DataPipeline.fetch_financial_indicators(code)
+                if data is None:
                     continue
 
-                # Take the most recent report
-                latest = df.iloc[0]
-                report_date = str(latest.get("日期", "")).strip()
-                if not report_date:
-                    continue
+                report_date = data["report_date"]
 
                 # Upsert
                 existing = (
@@ -228,9 +283,30 @@ class DataPipeline:
                     .first()
                 )
                 if existing:
-                    _update_financial_indicator(existing, latest)
+                    existing.roe = data.get("roe")
+                    existing.eps = data.get("eps")
+                    existing.gross_margin = data.get("gross_margin")
+                    existing.net_margin = data.get("net_margin")
+                    existing.revenue_growth = data.get("revenue_growth")
+                    existing.profit_growth = data.get("profit_growth")
+                    existing.asset_growth = data.get("asset_growth")
+                    existing.debt_ratio = data.get("debt_ratio")
+                    existing.current_ratio = data.get("current_ratio")
+                    existing.asset_turnover = data.get("asset_turnover")
+                    existing.cf_per_share = data.get("cf_per_share")
+                    existing.bv_per_share = data.get("bv_per_share")
+                    existing.revenue_per_share = data.get("revenue_per_share")
                 else:
-                    db.add(_create_financial_indicator(code, report_date, latest))
+                    db.add(FinancialIndicator(
+                        code=code, report_date=report_date,
+                        roe=data.get("roe"), eps=data.get("eps"),
+                        gross_margin=data.get("gross_margin"), net_margin=data.get("net_margin"),
+                        revenue_growth=data.get("revenue_growth"), profit_growth=data.get("profit_growth"),
+                        asset_growth=data.get("asset_growth"), debt_ratio=data.get("debt_ratio"),
+                        current_ratio=data.get("current_ratio"), asset_turnover=data.get("asset_turnover"),
+                        cf_per_share=data.get("cf_per_share"),
+                        bv_per_share=data.get("bv_per_share"), revenue_per_share=data.get("revenue_per_share"),
+                    ))
 
                 count += 1
                 if (i + 1) % 100 == 0:

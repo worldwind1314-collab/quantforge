@@ -205,21 +205,36 @@ def debug_connectivity():
     ak_results = {}
     try:
         import akshare as ak
-        # Test silver/commodity data (different API endpoint)
+        # Test stock list (working)
         try:
             df = ak.stock_info_a_code_name()
             ak_results["stock_info_a_code_name"] = {"ok": True, "rows": len(df)}
         except Exception as e:
             ak_results["stock_info_a_code_name"] = {"ok": False, "error": str(e)[:200]}
 
-        # Test an API that doesn't hit East Money
+        # Test index daily (working)
         try:
             df = ak.stock_zh_index_daily(symbol="sh000001")
             ak_results["stock_zh_index_daily"] = {"ok": True, "rows": len(df)}
         except Exception as e:
             ak_results["stock_zh_index_daily"] = {"ok": False, "error": str(e)[:200]}
 
-        # Test fund flow (another API)
+        # Test stock_zh_a_hist with different parameters / symbol format
+        for symbol in ["000001", "sz000001", "sh600519"]:
+            try:
+                df = ak.stock_zh_a_hist(symbol=symbol, period="daily", start_date="20260501", end_date="20260524", adjust="qfq")
+                ak_results[f"stock_zh_a_hist_{symbol}"] = {"ok": True, "rows": len(df) if df is not None else 0}
+            except Exception as e:
+                ak_results[f"stock_zh_a_hist_{symbol}"] = {"ok": False, "error": type(e).__name__ + ": " + str(e)[:150]}
+
+        # Test alternative: stock_zh_a_spot_em (spot data)
+        try:
+            df = ak.stock_zh_a_spot_em()
+            ak_results["stock_zh_a_spot_em"] = {"ok": True, "rows": len(df) if df is not None else 0}
+        except Exception as e:
+            ak_results["stock_zh_a_spot_em"] = {"ok": False, "error": str(e)[:200]}
+
+        # Test market PE (working)
         try:
             df = ak.stock_market_pe_lg()
             ak_results["stock_market_pe_lg"] = {"ok": True, "rows": len(df) if df is not None else 0}

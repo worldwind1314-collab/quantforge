@@ -170,8 +170,7 @@ def dashboard_overview(request: Request, db: Session = Depends(get_db)):
             .filter(MLPrediction.trade_date == d).scalar() or 0
         )
 
-    return templates.TemplateResponse("dashboard.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "dashboard.html", {
         "page": "overview",
         "stats": stats,
         "top_predictions": top_predictions,
@@ -251,8 +250,7 @@ def predictions_page(request: Request, db: Session = Depends(get_db)):
             pred_dist["bins"] = [f"{bins[i]:.2f}" for i in range(len(bins) - 1)]
             pred_dist["counts"] = hist.tolist()
 
-    return templates.TemplateResponse("predictions.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "predictions.html", {
         "page": "predictions",
         "stats": stats,
         "latest_date": latest_date,
@@ -323,8 +321,7 @@ def factors_page(request: Request, db: Session = Depends(get_db)):
                 for j in range(len(factor_names)):
                     corr_data["values"].append([i, j, round(float(corr[i][j]), 3)])
 
-    return templates.TemplateResponse("factors.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "factors.html", {
         "page": "factors",
         "stats": stats,
         "top_stocks": top_stocks,
@@ -342,8 +339,7 @@ def backtest_page(request: Request, db: Session = Depends(get_db)):
         .all()
     )
 
-    return templates.TemplateResponse("backtest.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "backtest.html", {
         "page": "backtest",
         "backtests": backtests,
     })
@@ -380,8 +376,7 @@ def data_status_page(request: Request, db: Session = Depends(get_db)):
         daily_counts["dates"].append(d[-5:])
         daily_counts["counts"].append(cnt)
 
-    return templates.TemplateResponse("data_status.html", {
-        "request": request,
+    return templates.TemplateResponse(request, "data_status.html", {
         "page": "data",
         "stats": stats,
         "market_stats": market_stats,

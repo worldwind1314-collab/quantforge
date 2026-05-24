@@ -9,6 +9,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ..core.database import engine, SessionLocal
+from ..models.finance import FinancialIndicator
 from ..models.market import DailyQuote
 from ..models.stock import Stock
 
@@ -16,13 +17,12 @@ logger = logging.getLogger(__name__)
 
 
 class DataPipeline:
-    """Sync A-share stock list and daily quotes via AKShare."""
+    """Sync A-share stock list, daily quotes, and financial data via AKShare."""
 
     # ── Stock list ─────────────────────────────────────────────────
 
     @staticmethod
     def fetch_stock_list() -> pd.DataFrame:
-        """Fetch all A-share stocks from AKShare. Returns DataFrame."""
         df = ak.stock_info_a_code_name()
         df.columns = [c.strip() for c in df.columns]
         logger.info(f"Fetched {len(df)} stocks from AKShare")
@@ -30,7 +30,6 @@ class DataPipeline:
 
     @staticmethod
     def sync_stock_list(db: Session | None = None) -> int:
-        """Insert or update stock basic info. Returns count of stocks synced."""
         if db is None:
             db = SessionLocal()
             close_db = True
@@ -55,7 +54,6 @@ class DataPipeline:
                     existing.market = market
                 else:
                     db.add(Stock(code=code, name=name, market=market))
-
                 count += 1
 
             db.commit()
@@ -74,17 +72,6 @@ class DataPipeline:
         end_date: str | None = None,
         period: str = "daily",
     ) -> dict[str, pd.DataFrame]:
-        """Fetch daily K-line data for given stocks.
-
-        Args:
-            codes: List of stock codes. If None, fetches all stocks from DB.
-            start_date: Start date YYYYMMDD. Defaults to 2 years ago.
-            end_date: End date YYYYMMDD. Defaults to today.
-            period: 'daily', 'weekly', or 'monthly'.
-
-        Returns:
-            Dict mapping stock code → DataFrame.
-        """
         if start_date is None:
             start_date = (date.today() - timedelta(days=730)).strftime("%Y%m%d")
         if end_date is None:
@@ -98,11 +85,7 @@ class DataPipeline:
         for i, code in enumerate(codes):
             try:
                 df = ak.stock_zh_a_hist(
-                    symbol=code,
-                    period=period,
-                    start_date=start_date,
-                    end_date=end_date,
-                    adjust="qfq",  # 前复权
+                    symbol=code, period=period, start_date=start_date, end_date=end_date, adjust="qfq",
                 )
                 if not df.empty:
                     results[code] = df
@@ -115,10 +98,7 @@ class DataPipeline:
         return results
 
     @staticmethod
-    def save_daily_quotes(
-        data: dict[str, pd.DataFrame], db: Session | None = None
-    ) -> int:
-        """Upsert daily quotes into DB. Returns total rows saved."""
+    def save_daily_quotes(data: dict[str, pd.DataFrame], db: Session | None = None) -> int:
         if db is None:
             db = SessionLocal()
             close_db = True
@@ -133,10 +113,7 @@ class DataPipeline:
                     if not trade_date:
                         continue
 
-                    # Upsert: delete existing then insert
-                    stmt = text(
-                        "DELETE FROM daily_quotes WHERE code = :code AND trade_date = :td"
-                    )
+                    stmt = text("DELETE FROM daily_quotes WHERE code = :code AND trade_date = :td")
                     db.execute(stmt, {"code": code, "td": trade_date})
 
                     db.add(
@@ -164,11 +141,70 @@ class DataPipeline:
             if close_db:
                 db.close()
 
+    # ── Financial indicators ───────────────────────────────────────
+
+    @staticmethod
+    def fetch_financial_indicators(code: str) -> pd.DataFrame | None:
+        """Fetch financial analysis indicators for a single stock."""
+        try:
+            df = ak.stock_financial_analysis_indicator(symbol=code, start_year="2023")
+            return df
+        except Exception:
+            logger.debug(f"Failed to fetch financial indicators for {code}")
+            return None
+
+    @staticmethod
+    def sync_financial_indicators(codes: list[str] | None = None, db: Session | None = None) -> int:
+        """Sync latest financial indicators for given stocks."""
+        if db is None:
+            db = SessionLocal()
+            close_db = True
+        else:
+            close_db = False
+
+        if codes is None:
+            codes = [r[0] for r in db.query(Stock.code).filter(Stock.is_active == True).all()]
+
+        try:
+            count = 0
+            for i, code in enumerate(codes):
+                df = DataPipeline.fetch_financial_indicators(code)
+                if df is None or df.empty:
+                    continue
+
+                # Take the most recent report
+                latest = df.iloc[0]
+                report_date = str(latest.get("日期", "")).strip()
+                if not report_date:
+                    continue
+
+                # Upsert
+                existing = (
+                    db.query(FinancialIndicator)
+                    .filter(FinancialIndicator.code == code, FinancialIndicator.report_date == report_date)
+                    .first()
+                )
+                if existing:
+                    _update_financial_indicator(existing, latest)
+                else:
+                    db.add(_create_financial_indicator(code, report_date, latest))
+
+                count += 1
+                if (i + 1) % 100 == 0:
+                    db.commit()
+                    logger.info(f"Financial sync: {i + 1}/{len(codes)}")
+
+            db.commit()
+            logger.info(f"Synced financial indicators for {count} stocks")
+            return count
+        finally:
+            if close_db:
+                db.close()
+
     # ── Full sync ──────────────────────────────────────────────────
 
     @staticmethod
     def full_sync(start_date: str | None = None, end_date: str | None = None) -> dict:
-        """One-shot: sync stock list then daily quotes. Returns summary dict."""
         db = SessionLocal()
         try:
             stock_count = DataPipeline.sync_stock_list(db)
@@ -179,14 +215,8 @@ class DataPipeline:
         finally:
             db.close()
 
-    # ── Incremental sync ───────────────────────────────────────────
-
     @staticmethod
     def incremental_sync(lookback_days: int = 7) -> dict:
-        """Daily-use: sync stock list + fetch only the last N trading days.
-
-        Much faster than full_sync — suitable for cron daily runs.
-        """
         from datetime import date, timedelta
 
         db = SessionLocal()
@@ -199,17 +229,20 @@ class DataPipeline:
 
             quotes_data = DataPipeline.fetch_daily_quotes(codes, start_date, end_date)
             quote_count = DataPipeline.save_daily_quotes(quotes_data, db)
+            fin_count = DataPipeline.sync_financial_indicators(codes, db)
             return {
                 "stocks_synced": stock_count,
                 "quotes_saved": quote_count,
+                "financial_synced": fin_count,
                 "stocks_with_data": len(quotes_data),
             }
         finally:
             db.close()
 
 
+# ── Helpers ────────────────────────────────────────────────────────
+
 def _safe_float(val) -> float | None:
-    """Convert value to float, return None on failure."""
     if val is None:
         return None
     try:
@@ -217,3 +250,35 @@ def _safe_float(val) -> float | None:
         return None if pd.isna(f) else f
     except (ValueError, TypeError):
         return None
+
+
+def _create_financial_indicator(code: str, report_date: str, row: pd.Series) -> FinancialIndicator:
+    return FinancialIndicator(
+        code=code,
+        report_date=report_date,
+        roe=_safe_float(row.get("净资产收益率(%)")),
+        eps=_safe_float(row.get("摊薄每股收益(元)")),
+        gross_margin=_safe_float(row.get("销售毛利率(%)")),
+        net_margin=_safe_float(row.get("销售净利率(%)")),
+        revenue_growth=_safe_float(row.get("主营业务收入增长率(%)")),
+        profit_growth=_safe_float(row.get("净利润增长率(%)")),
+        asset_growth=_safe_float(row.get("总资产增长率(%)")),
+        debt_ratio=_safe_float(row.get("资产负债率(%)")),
+        current_ratio=_safe_float(row.get("流动比率")),
+        asset_turnover=_safe_float(row.get("总资产周转率(次)")),
+        cf_per_share=_safe_float(row.get("每股经营性现金流(元)")),
+    )
+
+
+def _update_financial_indicator(fi: FinancialIndicator, row: pd.Series):
+    fi.roe = _safe_float(row.get("净资产收益率(%)"))
+    fi.eps = _safe_float(row.get("摊薄每股收益(元)"))
+    fi.gross_margin = _safe_float(row.get("销售毛利率(%)"))
+    fi.net_margin = _safe_float(row.get("销售净利率(%)"))
+    fi.revenue_growth = _safe_float(row.get("主营业务收入增长率(%)"))
+    fi.profit_growth = _safe_float(row.get("净利润增长率(%)"))
+    fi.asset_growth = _safe_float(row.get("总资产增长率(%)"))
+    fi.debt_ratio = _safe_float(row.get("资产负债率(%)"))
+    fi.current_ratio = _safe_float(row.get("流动比率"))
+    fi.asset_turnover = _safe_float(row.get("总资产周转率(次)"))
+    fi.cf_per_share = _safe_float(row.get("每股经营性现金流(元)"))

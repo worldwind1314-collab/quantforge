@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .api import market_data, trading
 from .core.config import settings
 from .core.database import Base, engine
-from .models import DailyQuote, Stock, PaperAccount, PaperPosition, PaperOrder, BacktestResult  # noqa: F401
+from .models import DailyQuote, Stock, PaperAccount, PaperPosition, PaperOrder, BacktestResult, FinancialIndicator, FactorScore, MLPrediction  # noqa: F401
 
 
 @asynccontextmanager

@@ -373,21 +373,31 @@ class BacktestEngine:
         )
 
 
+def _native(val):
+    """Convert numpy types to Python native types for DB insertion."""
+    import numpy as np
+    if isinstance(val, (np.floating, np.integer)):
+        return val.item()
+    if isinstance(val, np.bool_):
+        return bool(val)
+    return val
+
+
 def save_backtest_result(db: Session, report: BacktestReport) -> int:
     """Persist backtest report to DB, return ID."""
     result = BacktestResultModel(
         strategy_name=report.strategy_name,
         start_date=report.start_date,
         end_date=report.end_date,
-        initial_capital=report.initial_capital,
-        final_value=report.final_value,
-        total_return=report.total_return,
-        annual_return=report.annual_return,
-        sharpe_ratio=report.sharpe_ratio,
-        max_drawdown=report.max_drawdown,
-        win_rate=report.win_rate,
-        total_trades=report.total_trades,
-        profit_factor=report.profit_factor,
+        initial_capital=_native(report.initial_capital),
+        final_value=_native(report.final_value),
+        total_return=_native(report.total_return),
+        annual_return=_native(report.annual_return),
+        sharpe_ratio=_native(report.sharpe_ratio),
+        max_drawdown=_native(report.max_drawdown),
+        win_rate=_native(report.win_rate),
+        total_trades=_native(report.total_trades),
+        profit_factor=_native(report.profit_factor),
         daily_values_json=json.dumps(report.daily_values),
         trade_log_json=json.dumps(report.trades),
     )

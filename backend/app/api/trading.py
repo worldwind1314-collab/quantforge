@@ -272,10 +272,14 @@ def ml_train(
 ):
     """训练 XGBoost 多因子模型。"""
     global _ml_pipeline
-    pipeline = MLPipeline(db)
-    metrics = pipeline.train(start_date, end_date)
-    _ml_pipeline = pipeline
-    return {"status": "trained", "metrics": metrics}
+    try:
+        pipeline = MLPipeline(db)
+        metrics = pipeline.train(start_date, end_date)
+        _ml_pipeline = pipeline
+        return {"status": "trained", "metrics": metrics}
+    except Exception as e:
+        import traceback
+        return {"error": str(e), "traceback": traceback.format_exc()}
 
 
 @router.post("/ml/predict")

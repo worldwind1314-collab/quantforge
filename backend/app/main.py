@@ -15,6 +15,16 @@ from .models import DailyQuote, Stock, PaperAccount, PaperPosition, PaperOrder, 
 async def lifespan(app: FastAPI):
     """Startup: create tables; shutdown: clean up."""
     Base.metadata.create_all(bind=engine)
+
+    # Add new columns if they don't exist (lightweight migration)
+    from sqlalchemy import text
+    with engine.connect() as conn:
+        for col, col_type in [("bv_per_share", "FLOAT"), ("revenue_per_share", "FLOAT")]:
+            try:
+                conn.execute(text(f"ALTER TABLE financial_indicators ADD COLUMN IF NOT EXISTS {col} {col_type}"))
+                conn.commit()
+            except Exception:
+                conn.rollback()
     yield
 
 

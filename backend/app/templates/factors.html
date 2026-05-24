@@ -1,0 +1,111 @@
+{% extends "base.html" %}
+{% block title %}因子分析 — QuantForge{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>🔬 因子分析</h1>
+    <p>多因子模型表现分析 | {{ stats.fs_dates|default(0) }} 个交易日因子数据</p>
+</div>
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="label">因子记录总数</div>
+        <div class="value">{{ "{:,.0f}".format(stats.fs_count|default(0)) }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">覆盖股票数 (最新日)</div>
+        <div class="value">{{ stats.latest_codes|default(0) }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">综合得分均值</div>
+        <div class="value">{{ "%.2f" % stats.composite_mean if stats.composite_mean is not none else 'N/A' }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">综合得分标准差</div>
+        <div class="value">{{ "%.2f" % stats.composite_std if stats.composite_std is not none else 'N/A' }}</div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col">
+        <div class="card">
+            <h2>📊 因子得分分布 (最新日)</h2>
+            <div id="factor-dist-chart" class="chart-container"></div>
+        </div>
+    </div>
+    <div class="col">
+        <div class="card">
+            <h2>🔥 因子相关性热力图</h2>
+            <div id="corr-chart" class="chart-container"></div>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>⭐ Top 因子得分股票</h2>
+    {% if top_stocks %}
+    <table>
+        <thead><tr><th>代码</th><th>名称</th><th>价值</th><th>质量</th><th>动量</th><th>波动率</th><th>综合</th></tr></thead>
+        <tbody>
+        {% for s in top_stocks %}
+        <tr>
+            <td><strong>{{ s.code }}</strong></td><td>{{ s.name or '-' }}</td>
+            <td>{{ ("%.2f" % s.value_score) if s.value_score is not none else '-' }}</td>
+            <td>{{ ("%.2f" % s.quality_score) if s.quality_score is not none else '-' }}</td>
+            <td>{{ ("%.2f" % s.momentum_score) if s.momentum_score is not none else '-' }}</td>
+            <td>{{ ("%.2f" % s.volatility_score) if s.volatility_score is not none else '-' }}</td>
+            <td><strong>{{ ("%.2f" % s.composite_score) if s.composite_score is not none else '-' }}</strong></td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">暂无因子得分数据</div>
+    {% endif %}
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    var dom = document.getElementById('factor-dist-chart');
+    if (!dom) return;
+    var chart = echarts.init(dom);
+    var data = {{ factor_dist|tojson }};
+    var series = [];
+    var colors = { 'value': '#4fc3f7', 'quality': '#66bb6a', 'momentum': '#ffa726', 'volatility': '#ef5350', 'composite': '#ab47bc' };
+    for (var k in data) {
+        if (data[k] && data[k].length) {
+            series.push({ name: k, type: 'line', data: data[k], smooth: true, lineStyle: { color: colors[k] || '#999' }, itemStyle: { color: colors[k] || '#999' } });
+        }
+    }
+    var option = {
+        tooltip: { trigger: 'axis' },
+        legend: { data: Object.keys(data), textStyle: { color: '#8899aa', fontSize: 10 }, top: 0 },
+        grid: { left: 40, right: 20, top: 30, bottom: 30 },
+        xAxis: { type: 'category', data: Array.from({length: 100}, (_,i) => i+1) },
+        yAxis: { type: 'value' },
+        series: series
+    };
+    if (series.length) chart.setOption(option);
+})();
+
+(function() {
+    var dom = document.getElementById('corr-chart');
+    if (!dom) return;
+    var chart = echarts.init(dom);
+    var data = {{ corr_data|tojson }};
+    var option = {
+        tooltip: {},
+        grid: { left: 100, right: 20, top: 10, bottom: 60 },
+        xAxis: { type: 'category', data: data.labels || [], axisLabel: { fontSize: 10 } },
+        yAxis: { type: 'category', data: data.labels || [], axisLabel: { fontSize: 10 } },
+        visualMap: { min: -1, max: 1, inRange: { color: ['#ef5350', '#1a2332', '#66bb6a'] } },
+        series: [{
+            type: 'heatmap', data: data.values || [],
+            label: { show: true, fontSize: 10 }
+        }]
+    };
+    if (data.values && data.values.length) chart.setOption(option);
+})();
+</script>
+{% endblock %}

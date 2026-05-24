@@ -1,0 +1,183 @@
+{% extends "base.html" %}
+{% block title %}数据状态 — QuantForge{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>🗄️ 数据状态</h1>
+    <p>数据同步覆盖与质量监控</p>
+</div>
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="label">股票总数</div>
+        <div class="value">{{ stats.stock_count|default(0) }}</div>
+        <div class="sub">A 股全市场</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">有行情数据</div>
+        <div class="value">{{ stats.quote_codes|default(0) }}</div>
+        <div class="sub">{{ "%.1f%%" % (stats.quote_codes / stats.stock_count * 100) if stats.stock_count else '0%' }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">有财务数据</div>
+        <div class="value">{{ stats.fi_codes|default(0) }}</div>
+        <div class="sub">{{ "%.1f%%" % (stats.fi_codes / stats.stock_count * 100) if stats.stock_count else '0%' }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">行情最新日期</div>
+        <div class="value">{{ stats.latest_quote_date or 'N/A' }}</div>
+        <div class="sub">{{ stats.freshness or '未知' }}</div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>📊 数据覆盖概览</h2>
+    <div id="coverage-chart" class="chart-container" style="height: 300px;"></div>
+</div>
+
+<div class="row">
+    <div class="col">
+        <div class="card">
+            <h2>📋 行情数据覆盖率 (按市场)</h2>
+            <table>
+                <thead><tr><th>市场</th><th>总股票</th><th>有行情</th><th>覆盖率</th><th>状态</th></tr></thead>
+                <tbody>
+                {% for m in market_stats %}
+                <tr>
+                    <td>{{ m.market }}</td>
+                    <td>{{ m.total }}</td>
+                    <td>{{ m.with_quotes }}</td>
+                    <td>
+                        <div style="display:flex;align-items:center;gap:8px;">
+                            <div class="progress-bar" style="flex:1;"><div class="progress-fill" style="width:{{ m.pct }}%;"></div></div>
+                            <span>{{ "%.1f" % m.pct }}%</span>
+                        </div>
+                    </td>
+                    <td>
+                        {% if m.pct > 50 %}
+                        <span class="badge badge-green">良好</span>
+                        {% elif m.pct > 10 %}
+                        <span class="badge badge-orange">同步中</span>
+                        {% else %}
+                        <span class="badge badge-red">待同步</span>
+                        {% endif %}
+                    </td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+    <div class="col">
+        <div class="card">
+            <h2>📅 每日行情记录数趋势</h2>
+            <div id="daily-chart" class="chart-container"></div>
+        </div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>🔄 数据同步操作</h2>
+    <div style="display: flex; gap: 12px; flex-wrap: wrap;">
+        <button onclick="triggerSync(730)" style="padding:10px 20px;background:var(--accent);color:#000;border:none;border-radius:6px;cursor:pointer;font-weight:600;">
+            🔄 全量同步 (2年)
+        </button>
+        <button onclick="triggerSync(90)" style="padding:10px 20px;background:var(--card);color:var(--accent);border:1px solid var(--accent);border-radius:6px;cursor:pointer;">
+            📅 季度同步 (90天)
+        </button>
+        <button onclick="triggerSync(7)" style="padding:10px 20px;background:var(--card);color:var(--muted);border:1px solid var(--border);border-radius:6px;cursor:pointer;">
+            🔁 增量同步 (7天)
+        </button>
+        <button onclick="triggerFinancial()" style="padding:10px 20px;background:var(--card);color:var(--purple);border:1px solid var(--purple);border-radius:6px;cursor:pointer;">
+            💰 同步财务数据
+        </button>
+    </div>
+    <div id="sync-result" style="margin-top:12px;padding:12px;border-radius:6px;display:none;"></div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+var coverageLabels = [];
+var coverageTotal = [];
+var coverageQuotes = [];
+{% for m in market_stats %}
+coverageLabels.push('{{ m.market }}');
+coverageTotal.push({{ m.total }});
+coverageQuotes.push({{ m.with_quotes }});
+{% endfor %}
+
+(function() {
+    var dom = document.getElementById('coverage-chart');
+    if (!dom) return;
+    var chart = echarts.init(dom);
+    var option = {
+        tooltip: { trigger: 'axis' },
+        legend: { data: ['总数', '有数据'], textStyle: { color: '#8899aa' }, top: 0 },
+        grid: { left: 60, right: 20, top: 30, bottom: 30 },
+        xAxis: { type: 'category', data: coverageLabels },
+        yAxis: { type: 'value' },
+        series: [
+            { name: '总数', type: 'bar', data: coverageTotal, itemStyle: { color: '#2a3a4a' }, barGap: '20%' },
+            { name: '有数据', type: 'bar', data: coverageQuotes, itemStyle: { color: '#4fc3f7' } }
+        ]
+    };
+    if (coverageLabels.length) chart.setOption(option);
+})();
+
+(function() {
+    var dom = document.getElementById('daily-chart');
+    if (!dom) return;
+    var chart = echarts.init(dom);
+    var data = {{ daily_counts|tojson }};
+    var option = {
+        tooltip: { trigger: 'axis' },
+        grid: { left: 50, right: 20, top: 10, bottom: 30 },
+        xAxis: { type: 'category', data: data.dates || [], axisLabel: { fontSize: 9, rotate: 45 } },
+        yAxis: { type: 'value' },
+        series: [{
+            type: 'bar', data: data.counts || [],
+            itemStyle: { color: '#4fc3f7' }
+        }]
+    };
+    if (data.dates && data.dates.length) chart.setOption(option);
+})();
+
+async function triggerSync(days) {
+    var el = document.getElementById('sync-result');
+    el.style.display = 'block';
+    el.style.background = 'rgba(79,195,247,0.1)';
+    el.style.color = '#4fc3f7';
+    el.textContent = '⏳ 正在同步 ' + days + ' 天数据...';
+    try {
+        var resp = await fetch('/api/market/sync?days=' + days, { method: 'POST' });
+        var data = await resp.json();
+        el.style.background = 'rgba(102,187,106,0.1)';
+        el.style.color = '#66bb6a';
+        el.textContent = '✅ 同步完成！股票: ' + data.stocks_fetched + ', 行情: ' + data.total_quotes_saved + ', 财务: ' + (data.financial_synced || 0);
+    } catch(e) {
+        el.style.background = 'rgba(239,83,80,0.1)';
+        el.style.color = '#ef5350';
+        el.textContent = '❌ 同步失败: ' + e.message;
+    }
+}
+
+async function triggerFinancial() {
+    var el = document.getElementById('sync-result');
+    el.style.display = 'block';
+    el.style.background = 'rgba(171,71,188,0.1)';
+    el.style.color = '#ab47bc';
+    el.textContent = '⏳ 正在同步财务数据...';
+    try {
+        var resp = await fetch('/api/market/sync?days=1', { method: 'POST' });
+        var data = await resp.json();
+        el.style.background = 'rgba(102,187,106,0.1)';
+        el.style.color = '#66bb6a';
+        el.textContent = '✅ 财务数据同步完成！已同步 ' + (data.financial_synced || 0) + ' 只股票';
+    } catch(e) {
+        el.style.background = 'rgba(239,83,80,0.1)';
+        el.style.color = '#ef5350';
+        el.textContent = '❌ 同步失败: ' + e.message;
+    }
+}
+</script>
+{% endblock %}

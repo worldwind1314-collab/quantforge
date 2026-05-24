@@ -1,0 +1,109 @@
+{% extends "base.html" %}
+{% block title %}ML 预测 — QuantForge{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>🎯 ML 预测排名</h1>
+    <p>最新预测日期: {{ latest_date or 'N/A' }} | 共 {{ total|default(0) }} 只股票</p>
+</div>
+
+<div class="card">
+    <h2>预测收益率排名 (Top 50)</h2>
+    {% if predictions %}
+    <div style="overflow-x: auto;">
+    <table>
+        <thead>
+            <tr>
+                <th>排名</th><th>代码</th><th>名称</th>
+                <th>预测收益率</th><th>置信度</th>
+                <th>价值因子</th><th>质量因子</th><th>动量因子</th><th>波动率</th><th>综合得分</th>
+            </tr>
+        </thead>
+        <tbody>
+        {% for p in predictions[:50] %}
+        <tr>
+            <td><span class="badge {% if p.prediction_rank and p.prediction_rank <= 10 %}badge-purple{% elif p.prediction_rank and p.prediction_rank <= 30 %}badge-green{% else %}badge-orange{% endif %}">#{{ p.prediction_rank }}</span></td>
+            <td><strong>{{ p.code }}</strong></td>
+            <td>{{ p.name or '-' }}</td>
+            <td style="color: {% if p.predicted_return and p.predicted_return > 0 %}var(--green){% else %}var(--red){% endif %}">
+                {{ "%+.2f%%" % (p.predicted_return * 100) if p.predicted_return is not none else '-' }}
+            </td>
+            <td>{{ ("%.2f" % p.confidence) if p.confidence is not none else '-' }}</td>
+            <td>{{ ("%.2f" % p.value_score) if p.value_score is not none else '-' }}</td>
+            <td>{{ ("%.2f" % p.quality_score) if p.quality_score is not none else '-' }}</td>
+            <td>{{ ("%.2f" % p.momentum_score) if p.momentum_score is not none else '-' }}</td>
+            <td>{{ ("%.2f" % p.volatility_score) if p.volatility_score is not none else '-' }}</td>
+            <td>{{ ("%.2f" % p.composite_score) if p.composite_score is not none else '-' }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+    </div>
+    {% else %}
+    <div class="empty-state">暂无 ML 预测数据。请先运行 <code>POST /api/trading/ml/train</code> 训练模型。</div>
+    {% endif %}
+</div>
+
+<div class="row">
+    <div class="col">
+        <div class="card">
+            <h2>📊 预测收益率分布</h2>
+            <div id="pred-dist-chart" class="chart-container"></div>
+        </div>
+    </div>
+    <div class="col">
+        <div class="card">
+            <h2>🎯 Top/Bottom 对比</h2>
+            <div id="topbot-chart" class="chart-container"></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+(function() {
+    var dom = document.getElementById('pred-dist-chart');
+    if (!dom) return;
+    var chart = echarts.init(dom);
+    var data = {{ pred_dist|tojson }};
+    var option = {
+        tooltip: { trigger: 'axis' },
+        grid: { left: 40, right: 20, top: 10, bottom: 30 },
+        xAxis: { type: 'category', data: data.bins || [] },
+        yAxis: { type: 'value' },
+        series: [{
+            type: 'bar', data: data.counts || [],
+            itemStyle: { color: function(p) { return parseFloat(data.bins[p.dataIndex]) >= 0 ? '#66bb6a' : '#ef5350'; } }
+        }]
+    };
+    if (data.bins && data.bins.length) chart.setOption(option);
+})();
+
+(function() {
+    var dom = document.getElementById('topbot-chart');
+    if (!dom) return;
+    var chart = echarts.init(dom);
+    var top = {{ top_factors|tojson }};
+    var bot = {{ bot_factors|tojson }};
+    var option = {
+        tooltip: { trigger: 'axis' },
+        legend: { data: ['Top10均值', 'Bottom10均值'], textStyle: { color: '#8899aa', fontSize: 10 } },
+        radar: {
+            indicator: [
+                { name: '价值', max: 0.5 }, { name: '质量', max: 0.5 },
+                { name: '动量', max: 0.5 }, { name: '波动率', max: 0.5 },
+                { name: '综合', max: 0.5 }
+            ]
+        },
+        series: [{
+            type: 'radar',
+            data: [
+                { value: top, name: 'Top10均值', itemStyle: { color: '#66bb6a' }, lineStyle: { color: '#66bb6a' } },
+                { value: bot, name: 'Bottom10均值', itemStyle: { color: '#ef5350' }, lineStyle: { color: '#ef5350' } }
+            ]
+        }]
+    };
+    if (top && top.length) chart.setOption(option);
+})();
+</script>
+{% endblock %}

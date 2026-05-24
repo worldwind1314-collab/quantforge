@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}回测结果 — QuantForge{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>📈 回测结果</h1>
+    <p>基于 ML 预测的多空组合回测</p>
+</div>
+
+{% if backtests %}
+<div class="stats-grid">
+    {% set best = backtests|selectattr('total_return')|sort(attribute='total_return', reverse=True)|first %}
+    {% set latest = backtests|sort(attribute='created_at', reverse=True)|first if backtests else none %}
+    <div class="stat-card">
+        <div class="label">回测次数</div>
+        <div class="value">{{ backtests|length }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">最佳年化收益</div>
+        <div class="value" style="color: {% if best and best.annual_return and best.annual_return > 0 %}var(--green){% else %}var(--red){% endif %}">
+            {{ "%+.1f%%" % (best.annual_return * 100) if best and best.annual_return is not none else 'N/A' }}
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="label">最佳夏普比率</div>
+        <div class="value">{{ "%.2f" % best.sharpe_ratio if best and best.sharpe_ratio is not none else 'N/A' }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">最大回撤</div>
+        <div class="value" style="color: var(--red)">
+            {{ "%.1f%%" % (best.max_drawdown * 100) if best and best.max_drawdown is not none else 'N/A' }}
+        </div>
+    </div>
+    <div class="stat-card">
+        <div class="label">胜率</div>
+        <div class="value">{{ "%.1f%%" % (best.win_rate * 100) if best and best.win_rate is not none else 'N/A' }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">IC 均值</div>
+        <div class="value">{{ "%.4f" % best.ic_mean if best and best.ic_mean is not none else 'N/A' }}</div>
+    </div>
+</div>
+
+<div class="card">
+    <h2>📊 回测历史</h2>
+    <table>
+        <thead>
+            <tr><th>时间</th><th>起始日</th><th>结束日</th><th>累计收益</th><th>年化收益</th><th>夏普</th><th>最大回撤</th><th>胜率</th><th>IC均值</th></tr>
+        </thead>
+        <tbody>
+        {% for b in backtests|sort(attribute='created_at', reverse=True) %}
+        <tr>
+            <td>{{ b.created_at.strftime('%m-%d %H:%M') if b.created_at else '-' }}</td>
+            <td>{{ b.start_date or '-' }}</td>
+            <td>{{ b.end_date or '-' }}</td>
+            <td style="color: {% if b.total_return and b.total_return > 0 %}var(--green){% else %}var(--red){% endif %}">
+                {{ "%+.2f%%" % (b.total_return * 100) if b.total_return is not none else '-' }}
+            </td>
+            <td>{{ "%+.1f%%" % (b.annual_return * 100) if b.annual_return is not none else '-' }}</td>
+            <td>{{ "%.2f" % b.sharpe_ratio if b.sharpe_ratio is not none else '-' }}</td>
+            <td>{{ "%.1f%%" % (b.max_drawdown * 100) if b.max_drawdown is not none else '-' }}</td>
+            <td>{{ "%.1f%%" % (b.win_rate * 100) if b.win_rate is not none else '-' }}</td>
+            <td>{{ "%.4f" % b.ic_mean if b.ic_mean is not none else '-' }}</td>
+        </tr>
+        {% endfor %}
+        </tbody>
+    </table>
+</div>
+{% else %}
+<div class="card">
+    <div class="empty-state">
+        <p style="font-size: 18px; margin-bottom: 12px;">📈 暂无回测数据</p>
+        <p>回测基于 ML 预测结果生成。请先训练模型并运行回测。</p>
+        <p style="margin-top: 8px; font-size: 12px;"><code>POST /api/trading/ml/train</code> → <code>POST /api/trading/backtest/run</code></p>
+    </div>
+</div>
+{% endif %}
+{% endblock %}

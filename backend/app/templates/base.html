@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>{% block title %}QuantForge 熔量{% endblock %}</title>
+    <script src="https://cdn.bootcdn.net/ajax/libs/echarts/5.5.0/echarts.min.js"></script>
+    <style>
+        :root {
+            --bg: #0f1923;
+            --card: #1a2332;
+            --border: #2a3a4a;
+            --text: #e0e6ed;
+            --muted: #8899aa;
+            --accent: #4fc3f7;
+            --green: #66bb6a;
+            --red: #ef5350;
+            --orange: #ffa726;
+            --purple: #ab47bc;
+        }
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', 'PingFang SC', 'Microsoft YaHei', sans-serif;
+            background: var(--bg);
+            color: var(--text);
+            min-height: 100vh;
+        }
+        .sidebar {
+            position: fixed; left: 0; top: 0; bottom: 0; width: 220px;
+            background: var(--card); border-right: 1px solid var(--border);
+            padding: 24px 0; z-index: 100;
+        }
+        .sidebar .logo {
+            padding: 0 20px 20px; border-bottom: 1px solid var(--border);
+            font-size: 20px; font-weight: 700; color: var(--accent);
+            margin-bottom: 8px;
+        }
+        .sidebar .logo span { font-size: 12px; color: var(--muted); font-weight: 400; }
+        .sidebar nav a {
+            display: block; padding: 12px 20px; color: var(--muted);
+            text-decoration: none; font-size: 14px; transition: all 0.2s;
+            border-left: 3px solid transparent;
+        }
+        .sidebar nav a:hover, .sidebar nav a.active {
+            color: var(--text); background: rgba(79,195,247,0.08);
+            border-left-color: var(--accent);
+        }
+        .sidebar nav a .icon { margin-right: 8px; }
+        .main {
+            margin-left: 220px; padding: 24px 32px;
+        }
+        .page-header { margin-bottom: 24px; }
+        .page-header h1 { font-size: 24px; font-weight: 600; }
+        .page-header p { color: var(--muted); font-size: 14px; margin-top: 4px; }
+        .stats-grid {
+            display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px; margin-bottom: 24px;
+        }
+        .stat-card {
+            background: var(--card); border: 1px solid var(--border);
+            border-radius: 8px; padding: 20px;
+        }
+        .stat-card .label { font-size: 12px; color: var(--muted); text-transform: uppercase; }
+        .stat-card .value { font-size: 28px; font-weight: 700; margin-top: 4px; }
+        .stat-card .sub { font-size: 12px; color: var(--muted); margin-top: 4px; }
+        .card {
+            background: var(--card); border: 1px solid var(--border);
+            border-radius: 8px; padding: 20px; margin-bottom: 20px;
+        }
+        .card h2 { font-size: 16px; font-weight: 600; margin-bottom: 16px; }
+        .chart-container { width: 100%; height: 360px; }
+        table {
+            width: 100%; border-collapse: collapse; font-size: 13px;
+        }
+        th, td { padding: 10px 12px; text-align: left; border-bottom: 1px solid var(--border); }
+        th { color: var(--muted); font-weight: 500; font-size: 11px; text-transform: uppercase; }
+        tr:hover { background: rgba(79,195,247,0.04); }
+        .badge {
+            display: inline-block; padding: 2px 8px; border-radius: 4px;
+            font-size: 11px; font-weight: 600;
+        }
+        .badge-green { background: rgba(102,187,106,0.2); color: var(--green); }
+        .badge-red { background: rgba(239,83,80,0.2); color: var(--red); }
+        .badge-orange { background: rgba(255,167,38,0.2); color: var(--orange); }
+        .badge-purple { background: rgba(171,71,188,0.2); color: var(--purple); }
+        .row { display: flex; gap: 20px; }
+        .col { flex: 1; }
+        .progress-bar {
+            height: 6px; background: var(--border); border-radius: 3px; margin-top: 6px;
+        }
+        .progress-fill { height: 100%; border-radius: 3px; background: var(--accent); }
+        .tag {
+            display: inline-block; padding: 2px 8px; border-radius: 4px;
+            font-size: 11px; background: rgba(79,195,247,0.1); color: var(--accent);
+            margin-right: 4px;
+        }
+        .empty-state {
+            text-align: center; padding: 40px; color: var(--muted);
+        }
+    </style>
+    {% block head %}{% endblock %}
+</head>
+<body>
+    <aside class="sidebar">
+        <div class="logo">熔量 QuantForge <span>v0.1</span></div>
+        <nav>
+            <a href="/" class="{% if page == 'overview' %}active{% endif %}">
+                <span class="icon">📊</span> 系统概览
+            </a>
+            <a href="/predictions" class="{% if page == 'predictions' %}active{% endif %}">
+                <span class="icon">🎯</span> ML 预测
+            </a>
+            <a href="/factors" class="{% if page == 'factors' %}active{% endif %}">
+                <span class="icon">🔬</span> 因子分析
+            </a>
+            <a href="/backtest" class="{% if page == 'backtest' %}active{% endif %}">
+                <span class="icon">📈</span> 回测结果
+            </a>
+            <a href="/data" class="{% if page == 'data' %}active{% endif %}">
+                <span class="icon">🗄️</span> 数据状态
+            </a>
+            <a href="/docs" target="_blank">
+                <span class="icon">📘</span> API 文档
+            </a>
+        </nav>
+    </aside>
+    <div class="main">
+        {% block content %}{% endblock %}
+    </div>
+    {% block scripts %}{% endblock %}
+</body>
+</html>

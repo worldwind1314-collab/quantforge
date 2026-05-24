@@ -74,4 +74,6 @@ class BacktestResult(Base):
     profit_factor: Mapped[float | None] = mapped_column(Float, nullable=True)
     daily_values_json: Mapped[str | None] = mapped_column(String)  # JSON array of daily P&L
     trade_log_json: Mapped[str | None] = mapped_column(String)  # JSON array of trade records
+    feature_importance_json: Mapped[str | None] = mapped_column(String)  # JSON dict of feature importance
+    ic_mean: Mapped[float | None] = mapped_column(Float, nullable=True)  # Spearman IC mean
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

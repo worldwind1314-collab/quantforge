@@ -1,0 +1,167 @@
+{% extends "base.html" %}
+{% block title %}QuantForge 熔量 — 系统概览{% endblock %}
+{% block head %}{% endblock %}
+{% block content %}
+<div class="page-header">
+    <h1>📊 系统概览</h1>
+    <p>QuantForge 熔量 AI 量化交易系统运行状态</p>
+</div>
+
+<div class="stats-grid">
+    <div class="stat-card">
+        <div class="label">股票覆盖</div>
+        <div class="value">{{ stats.stock_count|default(0) }}</div>
+        <div class="sub">全 A 股市场</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">行情数据</div>
+        <div class="value">{{ "{:,.0f}".format(stats.quote_count|default(0)) if stats.quote_count else '0' }}</div>
+        <div class="sub">{{ stats.quote_codes|default(0) }} 只股票 · 最新 {{ stats.latest_quote_date or 'N/A' }}</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">财务数据</div>
+        <div class="value">{{ stats.fi_count|default(0) }}</div>
+        <div class="sub">{{ stats.fi_codes|default(0) }} 只股票</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">因子得分</div>
+        <div class="value">{{ "{:,.0f}".format(stats.fs_count|default(0)) if stats.fs_count else '0' }}</div>
+        <div class="sub">{{ stats.fs_dates|default(0) }} 个交易日</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">ML 预测</div>
+        <div class="value">{{ "{:,.0f}".format(stats.ml_count|default(0)) if stats.ml_count else '0' }}</div>
+        <div class="sub">{{ stats.ml_dates|default(0) }} 个预测日</div>
+    </div>
+    <div class="stat-card">
+        <div class="label">最新模型 IC</div>
+        <div class="value" style="color: {% if stats.latest_ic and stats.latest_ic > 0 %}var(--green){% else %}var(--red){% endif %}">
+            {{ "%.4f" % stats.latest_ic if stats.latest_ic is not none else 'N/A' }}
+        </div>
+        <div class="sub">Spearman Rank IC</div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col">
+        <div class="card">
+            <h2>📈 ML 预测 Top 10 股票</h2>
+            {% if top_predictions %}
+            <table>
+                <thead><tr><th>排名</th><th>代码</th><th>名称</th><th>预测收益率</th><th>置信度</th></tr></thead>
+                <tbody>
+                {% for p in top_predictions %}
+                <tr>
+                    <td><span class="badge badge-purple">#{{ p.prediction_rank }}</span></td>
+                    <td>{{ p.code }}</td>
+                    <td>{{ p.name or '-' }}</td>
+                    <td style="color: {% if p.predicted_return and p.predicted_return > 0 %}var(--green){% else %}var(--red){% endif %}">
+                        {{ "%+.2f%%" % (p.predicted_return * 100) if p.predicted_return is not none else 'N/A' }}
+                    </td>
+                    <td>{{ ("%.2f" % p.confidence) if p.confidence is not none else '-' }}</td>
+                </tr>
+                {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div class="empty-state">暂无 ML 预测数据，请先训练模型</div>
+            {% endif %}
+        </div>
+    </div>
+    <div class="col">
+        <div class="card">
+            <h2>⚠️ 预测分布</h2>
+            <div id="pred-dist-chart" class="chart-container"></div>
+        </div>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col">
+        <div class="card">
+            <h2>🔬 因子重要性</h2>
+            <div id="feature-chart" class="chart-container"></div>
+        </div>
+    </div>
+    <div class="col">
+        <div class="card">
+            <h2>📊 数据覆盖趋势</h2>
+            <div id="coverage-chart" class="chart-container"></div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script>
+// Prediction distribution chart
+(function() {
+    var dom = document.getElementById('pred-dist-chart');
+    if (!dom) return;
+    var chart = echarts.init(dom);
+    var data = {{ pred_dist|tojson }};
+    var option = {
+        tooltip: { trigger: 'axis' },
+        grid: { left: 40, right: 20, top: 10, bottom: 30 },
+        xAxis: { type: 'category', data: data.bins || [], axisLabel: { fontSize: 10 } },
+        yAxis: { type: 'value', axisLabel: { fontSize: 10 } },
+        series: [{
+            type: 'bar', data: data.counts || [],
+            itemStyle: {
+                color: function(p) {
+                    var v = parseFloat(data.bins[p.dataIndex]);
+                    return v >= 0 ? '#66bb6a' : '#ef5350';
+                }
+            }
+        }]
+    };
+    if (data.bins && data.bins.length > 0) chart.setOption(option);
+    else dom.innerHTML = '<div class="empty-state">暂无数据</div>';
+})();
+
+// Feature importance chart
+(function() {
+    var dom = document.getElementById('feature-chart');
+    if (!dom) return;
+    var chart = echarts.init(dom);
+    var data = {{ feature_importance|tojson }};
+    var names = []; var values = [];
+    for (var k in data) { names.push(k); values.push(data[k]); }
+    var option = {
+        tooltip: { trigger: 'axis' },
+        grid: { left: 100, right: 20, top: 10, bottom: 30 },
+        yAxis: { type: 'category', data: names, axisLabel: { fontSize: 11 } },
+        xAxis: { type: 'value', max: 1, axisLabel: { fontSize: 10 } },
+        series: [{
+            type: 'bar', data: values, barWidth: 20,
+            itemStyle: { color: '#4fc3f7' },
+            label: { show: true, position: 'right', formatter: function(p) { return (p.value*100).toFixed(1) + '%'; }, fontSize: 10 }
+        }]
+    };
+    if (names.length > 0) chart.setOption(option);
+    else dom.innerHTML = '<div class="empty-state">暂无数据</div>';
+})();
+
+// Coverage trend chart
+(function() {
+    var dom = document.getElementById('coverage-chart');
+    if (!dom) return;
+    var chart = echarts.init(dom);
+    var data = {{ coverage_trend|tojson }};
+    var option = {
+        tooltip: { trigger: 'axis' },
+        legend: { data: ['行情', '因子', '预测'], textStyle: { color: '#8899aa', fontSize: 10 }, top: 0 },
+        grid: { left: 50, right: 20, top: 30, bottom: 30 },
+        xAxis: { type: 'category', data: data.dates || [], axisLabel: { fontSize: 9, rotate: 45 } },
+        yAxis: { type: 'value', axisLabel: { fontSize: 10 } },
+        series: [
+            { name: '行情', type: 'line', data: data.quotes || [], smooth: true, lineStyle: { color: '#4fc3f7' }, itemStyle: { color: '#4fc3f7' } },
+            { name: '因子', type: 'line', data: data.factors || [], smooth: true, lineStyle: { color: '#ab47bc' }, itemStyle: { color: '#ab47bc' } },
+            { name: '预测', type: 'line', data: data.predictions || [], smooth: true, lineStyle: { color: '#ffa726' }, itemStyle: { color: '#ffa726' } }
+        ]
+    };
+    if (data.dates && data.dates.length > 0) chart.setOption(option);
+    else dom.innerHTML = '<div class="empty-state">暂无数据</div>';
+})();
+</script>
+{% endblock %}

@@ -383,7 +383,7 @@ def _native(val):
     return val
 
 
-def save_backtest_result(db: Session, report: BacktestReport) -> int:
+def save_backtest_result(db: Session, report: BacktestReport, feature_importance: dict | None = None, ic_mean: float | None = None) -> int:
     """Persist backtest report to DB, return ID."""
     result = BacktestResultModel(
         strategy_name=report.strategy_name,
@@ -400,6 +400,8 @@ def save_backtest_result(db: Session, report: BacktestReport) -> int:
         profit_factor=_native(report.profit_factor),
         daily_values_json=json.dumps(report.daily_values),
         trade_log_json=json.dumps(report.trades),
+        feature_importance_json=json.dumps(feature_importance) if feature_importance else None,
+        ic_mean=ic_mean,
     )
     db.add(result)
     db.commit()

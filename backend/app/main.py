@@ -5,7 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from .api import market_data, trading
+from .api import dashboard, market_data, trading
 from .core.config import settings
 from .core.database import Base, engine
 from .models import DailyQuote, Stock, PaperAccount, PaperPosition, PaperOrder, BacktestResult, FinancialIndicator, FactorScore, MLPrediction  # noqa: F401
@@ -16,12 +16,18 @@ async def lifespan(app: FastAPI):
     """Startup: create tables; shutdown: clean up."""
     Base.metadata.create_all(bind=engine)
 
-    # Add new columns if they don't exist (lightweight migration)
+    # Lightweight migrations — add new columns if they don't exist
     from sqlalchemy import text
     with engine.connect() as conn:
-        for col, col_type in [("bv_per_share", "FLOAT"), ("revenue_per_share", "FLOAT")]:
+        migrations = [
+            ("financial_indicators", "bv_per_share", "FLOAT"),
+            ("financial_indicators", "revenue_per_share", "FLOAT"),
+            ("backtest_results", "feature_importance_json", "TEXT"),
+            ("backtest_results", "ic_mean", "FLOAT"),
+        ]
+        for table, col, col_type in migrations:
             try:
-                conn.execute(text(f"ALTER TABLE financial_indicators ADD COLUMN IF NOT EXISTS {col} {col_type}"))
+                conn.execute(text(f"ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {col} {col_type}"))
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -42,6 +48,7 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+app.include_router(dashboard.router)
 app.include_router(market_data.router, prefix="/api")
 app.include_router(trading.router, prefix="/api")
 

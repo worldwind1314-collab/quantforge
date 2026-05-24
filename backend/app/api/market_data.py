@@ -108,8 +108,11 @@ def trigger_sync(
     db: Session = Depends(get_db),
 ):
     """触发数据同步：同步指定股票的日线行情。"""
+    import logging
     from ..services.data_pipeline import DataPipeline
     from datetime import date, timedelta
+
+    logger = logging.getLogger(__name__)
 
     if codes:
         code_list = [c.strip() for c in codes.split(",") if c.strip()]
@@ -119,11 +122,52 @@ def trigger_sync(
     end_date = date.today().strftime("%Y%m%d")
     start_date = (date.today() - timedelta(days=days)).strftime("%Y%m%d")
 
+    logger.info(f"Syncing {len(code_list)} stocks from {start_date} to {end_date}")
+
     quotes_data = DataPipeline.fetch_daily_quotes(code_list, start_date, end_date)
     quote_count = DataPipeline.save_daily_quotes(quotes_data, db)
 
+    # Check existing daily quotes for these codes
+    from ..models.finance import FinancialIndicator
+    fi_codes = [r[0] for r in db.query(FinancialIndicator.code).distinct().all()]
+    fi_intersect = [c for c in code_list if c in fi_codes]
+
     return {
+        "stocks_requested": len(code_list),
         "stocks_fetched": len(quotes_data),
         "total_quotes_saved": quote_count,
         "date_range": f"{start_date} ~ {end_date}",
+        "stocks_with_financials": len(fi_intersect),
     }
+
+
+@router.get("/debug/akshare/{code}")
+def debug_akshare(code: str):
+    """Debug: test AKShare stock_zh_a_hist for a single stock."""
+    import traceback
+    try:
+        import akshare as ak
+        from datetime import date, timedelta
+
+        end_date = date.today().strftime("%Y%m%d")
+        start_date = (date.today() - timedelta(days=90)).strftime("%Y%m%d")
+
+        df = ak.stock_zh_a_hist(symbol=code, period="daily", start_date=start_date, end_date=end_date, adjust="qfq")
+
+        return {
+            "code": code,
+            "date_range": f"{start_date} ~ {end_date}",
+            "success": True,
+            "rows": len(df) if df is not None else 0,
+            "columns": list(df.columns) if df is not None and not df.empty else [],
+            "first_row": df.iloc[0].to_dict() if df is not None and not df.empty else None,
+            "last_row": df.iloc[-1].to_dict() if df is not None and not df.empty else None,
+        }
+    except Exception as e:
+        return {
+            "code": code,
+            "success": False,
+            "error": str(e),
+            "error_type": type(e).__name__,
+            "traceback": traceback.format_exc(),
+        }

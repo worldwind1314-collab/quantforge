@@ -82,6 +82,7 @@ class DataPipeline:
                 codes = [r[0] for r in db.query(Stock.code).filter(Stock.is_active == True).all()]
 
         results = {}
+        errors = []
         for i, code in enumerate(codes):
             try:
                 df = ak.stock_zh_a_hist(
@@ -91,9 +92,13 @@ class DataPipeline:
                     results[code] = df
                 if (i + 1) % 50 == 0:
                     logger.info(f"Fetched {i + 1}/{len(codes)} stocks")
-            except Exception:
-                logger.debug(f"Failed to fetch {code}, skipping")
+            except Exception as e:
+                errors.append(f"{code}: {e}")
+                if i < 3:
+                    logger.warning(f"Failed to fetch {code}: {e}")
 
+        if errors:
+            logger.warning(f"Failed to fetch {len(errors)}/{len(codes)} stocks. First errors: {errors[:3]}")
         logger.info(f"Fetched daily quotes for {len(results)}/{len(codes)} stocks")
         return results
 

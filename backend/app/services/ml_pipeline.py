@@ -1,4 +1,4 @@
-"""ML pipeline — XGBoost model training, prediction, stock ranking."""
+"""ML pipeline — LightGBM model for cross-sectional stock ranking."""
 
 import json
 import logging
@@ -15,17 +15,27 @@ from ..models.stock import Stock
 
 logger = logging.getLogger(__name__)
 
+# Feature columns produced by FactorEngine.compute_granular_factors()
+FEATURE_COLS = [
+    "mom_5d", "mom_10d", "mom_20d", "mom_60d", "mom_120d",
+    "vol_5d", "vol_20d", "vol_60d",
+    "turnover_5d", "turnover_20d", "vol_ratio_5_20",
+    "rsi_14", "price_position_20d", "max_dd_20d", "max_dd_60d",
+    "value_score", "quality_score",
+]
+
 
 class MLPipeline:
-    """XGBoost-based stock ranking pipeline.
+    """LightGBM-based stock ranking pipeline.
 
-    Trains on factor scores + future returns, predicts next-period returns,
-    and ranks stocks for portfolio selection.
+    Trains on granular factors + cross-sectional rank targets,
+    predicts next-period relative ranking for all stocks.
     """
 
     def __init__(self, db: Session | None = None):
         self._db = db
         self._model = None
+        self._feature_names = None
 
     def _get_db(self) -> Session:
         return self._db or SessionLocal()
@@ -35,181 +45,178 @@ class MLPipeline:
     def prepare_training_data(
         self, start_date: str, end_date: str
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Build training dataset: compute factors from daily_quotes,
-        using weekly snapshots to reduce computation.
+        """Build training dataset from granular factors for ALL stocks with price data.
+
+        Target: cross-sectional rank percentile of forward 20-day return.
+        Each stock is ranked against all other stocks on the same date,
+        producing a target in [0, 1].
 
         Returns (X, y) as numpy arrays.
         """
         db = self._get_db()
 
-        # Always compute factors from daily_quotes to ensure consistent coverage.
-        # FactorScore table may have sparse/inconsistent data.
-        try:
-            return self._build_from_quotes(db, start_date, end_date)
-        except ValueError:
-            # Fallback: try pre-computed FactorScore
-            factors = (
-                db.query(FactorScore)
-                .filter(FactorScore.trade_date >= start_date, FactorScore.trade_date <= end_date)
-                .order_by(FactorScore.trade_date, FactorScore.code)
-                .all()
-            )
-            if len(factors) >= 50:
-                return self._build_from_factors(db, factors)
-            raise ValueError(f"Not enough factor data: {len(factors)} rows")
+        # Get ALL stocks that have price data (not just those with financials)
+        quote_codes = sorted(
+            r[0] for r in db.query(DailyQuote.code).distinct().all()
+        )
+        if not quote_codes:
+            raise ValueError("No stocks with price data")
 
-    def _build_from_factors(self, db: Session, factors: list) -> tuple[np.ndarray, np.ndarray]:
-        factor_data = []
-        for f in factors:
-            factor_data.append({
-                "code": f.code, "trade_date": f.trade_date,
-                "value": f.value_score or 0, "quality": f.quality_score or 0,
-                "momentum": f.momentum_score or 0, "volatility": f.volatility_score or 0,
-                "composite": f.composite_score or 0,
-            })
-        df = pd.DataFrame(factor_data)
-        df["trade_date"] = pd.to_datetime(df["trade_date"])
-        return self._build_features_labels(db, df)
+        logger.info(f"Training universe: {len(quote_codes)} stocks with price data")
 
-    def _build_from_quotes(self, db: Session, start_date: str, end_date: str) -> tuple[np.ndarray, np.ndarray]:
-        """Compute factors directly from daily_quotes using weekly snapshots."""
         from .factor_engine import FactorEngine
 
         engine = FactorEngine(db)
 
-        # Get stocks that have price data + financial data
-        from ..models.finance import FinancialIndicator
-
-        fi_codes = set(r[0] for r in db.query(FinancialIndicator.code).distinct().all())
-        quote_codes = set(r[0] for r in db.query(DailyQuote.code).distinct().all())
-        codes = list(fi_codes & quote_codes)
-
-        if not codes:
-            raise ValueError("No stocks with both financial and price data")
-
-        # Use weekly snapshots to maximize training samples from limited stock universe
-        from datetime import date, timedelta
-
-        all_data = []
+        # Weekly snapshots over the date range
+        all_samples = []
         current = date.fromisoformat(end_date)
         start = date.fromisoformat(start_date)
+
+        snapshot_dates = []
         while current >= start:
-            date_str = current.isoformat()
-            try:
-                factors = engine.compute_all_factors(date_str, codes=codes)
-                engine.save_factors(factors, date_str, db)
-                for code, row in factors.iterrows():
-                    if row.get("composite_score") is None:
-                        continue
-                    all_data.append({
-                        "code": str(code), "trade_date": date_str,
-                        "value": _nativize_ml(row.get("value_score")) or 0,
-                        "quality": _nativize_ml(row.get("quality_score")) or 0,
-                        "momentum": _nativize_ml(row.get("momentum_score")) or 0,
-                        "volatility": _nativize_ml(row.get("volatility_score")) or 0,
-                        "composite": _nativize_ml(row.get("composite_score")) or 0,
-                    })
-            except Exception as e:
-                logger.debug(f"No factor data for {date_str}: {e}")
+            snapshot_dates.append(current.isoformat())
             current -= timedelta(days=7)
 
-        if len(all_data) < 20:
-            raise ValueError(f"Not enough training samples: {len(all_data)}")
+        logger.info(f"Computing factors for {len(snapshot_dates)} weekly snapshots...")
 
-        df = pd.DataFrame(all_data)
-        df["trade_date"] = pd.to_datetime(df["trade_date"])
-        logger.info(f"Built {len(df)} training samples from daily_quotes")
-        return self._build_features_labels(db, df)
+        for i, snap_date in enumerate(snapshot_dates):
+            try:
+                factors_df = engine.compute_granular_factors(snap_date, codes=quote_codes)
+                if factors_df.empty:
+                    continue
 
-    def _build_features_labels(self, db: Session, df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
-        labels, features = [], []
-        for _, row in df.iterrows():
-            forward_ret = self._get_forward_return(
-                db, row["code"], row["trade_date"].strftime("%Y-%m-%d"), horizon=20
-            )
-            if forward_ret is not None:
-                features.append([
-                    row["value"], row["quality"], row["momentum"],
-                    row["volatility"], row["composite"],
-                ])
-                labels.append(forward_ret)
+                # Compute cross-sectional rank target for this date
+                forward_rets = {}
+                for code in factors_df.index:
+                    ret = self._get_forward_return(db, code, snap_date, horizon=20)
+                    if ret is not None:
+                        forward_rets[code] = ret
 
-        if len(features) < 20:
-            raise ValueError(f"Not enough training samples: {len(features)}")
+                if len(forward_rets) < 50:
+                    continue
 
-        y = np.array(labels)
-        lo, hi = np.percentile(y, [1, 99])
-        mask = (y >= lo) & (y <= hi)
-        X, y = np.array(features)[mask], y[mask]
+                # Cross-sectional rank percentile (0 to 1)
+                ret_series = pd.Series(forward_rets)
+                ranks = ret_series.rank(pct=True)
 
-        logger.info(f"Training data: {len(X)} samples, 5 features")
+                for code in factors_df.index:
+                    if code not in forward_rets:
+                        continue
+                    feats = {}
+                    for col in FEATURE_COLS:
+                        val = factors_df.loc[code, col] if col in factors_df.columns else None
+                        feats[col] = val if not (isinstance(val, float) and np.isnan(val)) else None
+                    feats["target"] = ranks[code]
+                    feats["code"] = code
+                    feats["trade_date"] = snap_date
+                    all_samples.append(feats)
+
+                if (i + 1) % 10 == 0:
+                    logger.info(f"  Snapshot {i+1}/{len(snapshot_dates)}: {snap_date}, "
+                                f"{len(forward_rets)} stocks with targets, "
+                                f"{len(all_samples)} total samples")
+
+            except Exception as e:
+                logger.debug(f"Snapshot {snap_date} failed: {e}")
+                continue
+
+        if len(all_samples) < 100:
+            raise ValueError(f"Not enough training samples: {len(all_samples)}")
+
+        df = pd.DataFrame(all_samples)
+        X = df[FEATURE_COLS].values.astype(np.float32)
+        y = df["target"].values.astype(np.float32)
+
+        # Fill NaN with 0 (LightGBM handles NaN natively, but this is safer for numpy)
+        # We'll pass NaN-aware to LightGBM
+        logger.info(f"Training data: {len(X)} samples, {len(FEATURE_COLS)} features")
+        logger.info(f"Target stats: mean={y.mean():.3f}, std={y.std():.3f}, "
+                    f"min={y.min():.3f}, max={y.max():.3f}")
+
+        self._feature_names = FEATURE_COLS
         return X, y
 
     # ── Model training ─────────────────────────────────────────────
 
     def train(self, start_date: str = "2024-01-01", end_date: str = "2026-05-01") -> dict:
-        """Train XGBoost model on historical factor data. Returns training metrics."""
+        """Train LightGBM model. Returns training metrics."""
+        import lightgbm as lgb
+
         X, y = self.prepare_training_data(start_date, end_date)
 
-        # Train/validation split (time-series, last 20% for validation)
+        # Time-series split: last 20% for validation
         split = int(len(X) * 0.8)
         X_train, X_val = X[:split], X[split:]
         y_train, y_val = y[:split], y[split:]
 
-        import xgboost as xgb
+        logger.info(f"Train: {len(X_train)} samples, Val: {len(X_val)} samples")
 
-        # Adjust model complexity to dataset size
-        n_est = min(200, max(50, len(X_train) // 2))
-        max_d = min(5, max(2, len(X_train) // 40))
+        # LightGBM with ranking-aware parameters
+        n_est = min(500, max(100, len(X_train) // 5))
+        num_leaves = min(63, max(15, len(X_train) // 200))
 
-        self._model = xgb.XGBRegressor(
+        self._model = lgb.LGBMRegressor(
             n_estimators=n_est,
-            max_depth=max_d,
-            learning_rate=0.05,
-            subsample=0.8,
-            colsample_bytree=0.8,
+            num_leaves=num_leaves,
+            learning_rate=0.03,
+            subsample=0.7,
+            subsample_freq=1,
+            colsample_bytree=0.7,
             reg_alpha=0.1,
-            reg_lambda=1.0,
+            reg_lambda=0.5,
+            min_child_samples=20,
             random_state=42,
             n_jobs=-1,
+            verbose=-1,
         )
         self._model.fit(
             X_train, y_train,
             eval_set=[(X_val, y_val)],
-            verbose=False,
+            eval_metric="rmse",
+            callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(20)],
         )
 
         # Evaluate
         pred_train = self._model.predict(X_train)
         pred_val = self._model.predict(X_val)
 
-        from sklearn.metrics import mean_squared_error, r2_score
         import scipy.stats as stats
 
         train_ic = stats.spearmanr(y_train, pred_train)[0]
         val_ic = stats.spearmanr(y_val, pred_val)[0]
-        val_rmse = np.sqrt(mean_squared_error(y_val, pred_val))
-        val_r2 = r2_score(y_val, pred_val)
+
+        # Also compute IC using raw forward returns (more interpretable)
+        # For ranking target, IC on the ranks is what matters
+        val_mse = np.mean((y_val - pred_val) ** 2)
+        val_mae = np.mean(np.abs(y_val - pred_val))
 
         # Feature importance
         importance = dict(
             zip(
-                ["value", "quality", "momentum", "volatility", "composite"],
+                FEATURE_COLS,
                 self._model.feature_importances_.tolist(),
             )
         )
+        # Sort by importance
+        importance = dict(sorted(importance.items(), key=lambda x: x[1], reverse=True))
+
+        # Compute IC by date (within each cross-section)
+        # We don't have dates in the split arrays, so skip for now
 
         metrics = {
             "train_samples": len(X_train),
             "val_samples": len(X_val),
             "train_ic": round(train_ic, 4),
             "val_ic": round(val_ic, 4),
-            "val_rmse": round(val_rmse, 4),
-            "val_r2": round(val_r2, 4),
+            "val_mse": round(val_mse, 4),
+            "val_mae": round(val_mae, 4),
             "feature_importance": importance,
+            "n_features": len(FEATURE_COLS),
+            "best_iteration": self._model.best_iteration_,
         }
 
-        logger.info(f"Model trained: IC={val_ic:.4f}, R²={val_r2:.4f}")
+        logger.info(f"Model trained: IC={val_ic:.4f}, best_iter={self._model.best_iteration_}")
         return metrics
 
     # ── Prediction ─────────────────────────────────────────────────
@@ -220,52 +227,62 @@ class MLPipeline:
             raise RuntimeError("Model not trained. Call train() first.")
 
         db = self._get_db()
-        factors = (
-            db.query(FactorScore)
-            .filter(FactorScore.trade_date == trade_date)
-            .all()
+
+        from .factor_engine import FactorEngine
+
+        engine = FactorEngine(db)
+
+        # Get all stocks with price data
+        codes = sorted(
+            r[0] for r in db.query(DailyQuote.code)
+            .filter(DailyQuote.trade_date == trade_date)
+            .distinct().all()
         )
-
-        if not factors:
-            raise ValueError(f"No factor data for {trade_date}")
-
-        codes = [f.code for f in factors]
-        X = np.array(
-            [[f.value_score or 0, f.quality_score or 0, f.momentum_score or 0, f.volatility_score or 0, f.composite_score or 0] for f in factors]
-        )
-
-        preds = self._model.predict(X)
-
-        # Build ranking
-        results = []
-        for i, (code, pred) in enumerate(zip(codes, preds)):
-            results.append(
-                {
-                    "code": code,
-                    "trade_date": trade_date,
-                    "predicted_return": round(float(pred), 4),
-                    "confidence": self._estimate_confidence(factors[i]),
-                }
+        if not codes:
+            # Fallback: get all active stocks
+            codes = sorted(
+                r[0] for r in db.query(Stock.code).filter(Stock.is_active == True).all()
             )
 
-        results.sort(key=lambda x: x["predicted_return"], reverse=True)
+        logger.info(f"Computing factors for {len(codes)} stocks on {trade_date}")
+        factors_df = engine.compute_granular_factors(trade_date, codes=codes)
 
-        # Assign ranks
+        # Build feature matrix
+        X = np.zeros((len(factors_df), len(FEATURE_COLS)), dtype=np.float32)
+        valid_codes = []
+        for i, code in enumerate(factors_df.index):
+            feats = []
+            for col in FEATURE_COLS:
+                val = factors_df.loc[code, col] if col in factors_df.columns else np.nan
+                feats.append(val if not (isinstance(val, float) and np.isnan(val)) else np.nan)
+            X[i] = feats
+            valid_codes.append(code)
+
+        # Fill NaN with 0 for prediction (LightGBM handles NaN but some versions don't)
+        X = np.nan_to_num(X, nan=0.0)
+        preds = self._model.predict(X)
+
+        # Build results
+        results = []
+        for code, pred in zip(valid_codes, preds):
+            results.append({
+                "code": code,
+                "trade_date": trade_date,
+                "predicted_return": round(float(pred), 4),
+                "confidence": 0.5,  # simplified
+            })
+
+        results.sort(key=lambda x: x["predicted_return"], reverse=True)
         for rank, r in enumerate(results, 1):
             r["prediction_rank"] = rank
 
-        # Save to DB
         self._save_predictions(db, results)
-
         return results[:top_n]
 
     # ── Market regime detection ────────────────────────────────────
 
     def detect_market_regime(self) -> dict:
-        """Detect current market regime: bull, bear, or neutral.
-
-        Uses 60-day moving average of CSI 000001 (SZ) as proxy for A-share market.
-        """
+        """Detect current market regime using CSI 000001 as proxy."""
         db = self._get_db()
         try:
             rows = (
@@ -275,7 +292,6 @@ class MLPipeline:
                 .limit(120)
                 .all()
             )
-
             if len(rows) < 60:
                 return {"regime": "unknown", "confidence": 0}
 
@@ -288,8 +304,6 @@ class MLPipeline:
             ma120 = np.mean(closes[:120]) if len(closes) >= 120 else ma60
 
             current = closes[0]
-
-            # Regime detection
             above_short = current > ma20
             above_mid = ma20 > ma60
             above_long = ma60 > ma120 if len(closes) >= 120 else True
@@ -313,7 +327,9 @@ class MLPipeline:
                 "current_price": current,
                 "ma20": round(ma20, 2),
                 "ma60": round(ma60, 2),
-                "signal": "buy" if regime in ("bull", "bullish") else ("sell" if regime in ("bear", "bearish") else "hold"),
+                "signal": "buy" if regime in ("bull", "bullish") else (
+                    "sell" if regime in ("bear", "bearish") else "hold"
+                ),
             }
         except Exception as e:
             logger.warning(f"Regime detection failed: {e}")
@@ -334,7 +350,6 @@ class MLPipeline:
         if len(future) < horizon:
             return None
 
-        # Get close from trade_date
         current = (
             db.query(DailyQuote)
             .filter(DailyQuote.code == code, DailyQuote.trade_date == trade_date)
@@ -348,21 +363,6 @@ class MLPipeline:
             return None
 
         return (target.close - current.close) / current.close * 100
-
-    @staticmethod
-    def _estimate_confidence(factor: FactorScore) -> float:
-        """Estimate prediction confidence based on factor availability."""
-        available = sum(
-            1
-            for x in [
-                factor.value_score,
-                factor.quality_score,
-                factor.momentum_score,
-                factor.volatility_score,
-            ]
-            if x is not None
-        )
-        return min(available / 4, 1.0)
 
     @staticmethod
     def _save_predictions(db: Session, results: list[dict]):
@@ -384,16 +384,3 @@ class MLPipeline:
                 )
             )
         db.commit()
-
-
-def _nativize_ml(val) -> float | None:
-    """Convert numpy types to Python native float or None."""
-    if val is None:
-        return None
-    try:
-        if hasattr(val, "item"):
-            return float(val.item())
-        f = float(val)
-        return None if np.isnan(f) else f
-    except (ValueError, TypeError):
-        return None

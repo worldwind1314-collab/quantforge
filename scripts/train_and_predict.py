@@ -7,7 +7,7 @@ from datetime import date
 sys.path.insert(0, ".")
 
 from app.core.database import SessionLocal
-from app.services.ml_pipeline import MLPipeline
+from app.services.ml_pipeline import MLPipeline, FEATURE_COLS
 from app.models.market import DailyQuote
 from sqlalchemy import func
 
@@ -27,18 +27,22 @@ logger.info("Training model: %s ~ %s", start_date, end_date)
 metrics = pipeline.train(start_date, end_date)
 train_samples = metrics.get("train_samples")
 val_ic = metrics.get("val_ic")
+val_mse = metrics.get("val_mse")
 feature_importance = metrics.get("feature_importance", {})
+n_features = metrics.get("n_features", 0)
+best_iter = metrics.get("best_iteration", 0)
 
-logger.info("Train done: samples=%s, val_ic=%s", train_samples, val_ic)
-logger.info("Feature importance: %s", feature_importance)
+logger.info("Train done: samples=%s, val_ic=%s, val_mse=%s, n_features=%s, best_iter=%s",
+            train_samples, val_ic, val_mse, n_features, best_iter)
+logger.info("Top features: %s",
+            dict(list(feature_importance.items())[:6]) if feature_importance else {})
 
 # ── Save model to disk ──
 with open(MODEL_FILE, "wb") as f:
     pickle.dump(
         {
             "model": pipeline._model,
-            "scaler": getattr(pipeline, "_scaler", None),
-            "feature_names": getattr(pipeline, "_feature_names", None),
+            "feature_names": pipeline._feature_names or FEATURE_COLS,
             "metrics": metrics,
         },
         f,
@@ -52,7 +56,6 @@ logger.info("Generating predictions for %s", latest_date)
 predictions = pipeline.predict(latest_date, top_n=100)
 logger.info("Generated %d predictions", len(predictions))
 
-# Print summary
 for p in predictions[:10]:
     logger.info(
         "  #%d %s return=%+.4f conf=%.2f",
@@ -65,8 +68,9 @@ for p in predictions[:10]:
 db.close()
 logger.info("Train + predict complete!")
 
-# Output key results for pipeline log
 print(f"TRAIN_SAMPLES={train_samples}")
 print(f"VAL_IC={val_ic}")
+print(f"VAL_MSE={val_mse}")
+print(f"N_FEATURES={n_features}")
 print(f"PREDICT_DATE={latest_date}")
 print(f"PREDICT_COUNT={len(predictions)}")

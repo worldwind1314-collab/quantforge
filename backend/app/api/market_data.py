@@ -278,12 +278,28 @@ def debug_connectivity():
     fin_results = {}
     try:
         import akshare as ak
+        fin_results["akshare_version"] = ak.__version__
         for code in ["000001", "600519"]:
             try:
                 df = ak.stock_financial_analysis_indicator(symbol=code, start_year="2023")
                 fin_results[f"financial_{code}"] = {"ok": True, "rows": len(df) if df is not None else 0}
             except Exception as e:
                 fin_results[f"financial_{code}"] = {"ok": False, "error": type(e).__name__ + ": " + str(e)[:150]}
+
+        # Test alternative financial data functions
+        for func_name in ["stock_financial_abstract", "stock_financial_report_sina", "stock_financial_benefit"]:
+            try:
+                fn = getattr(ak, func_name, None)
+                if fn is None:
+                    fin_results[func_name] = "not found"
+                else:
+                    try:
+                        df = fn(symbol="000001")
+                        fin_results[func_name] = {"ok": True, "rows": len(df) if df is not None else 0}
+                    except Exception as e2:
+                        fin_results[func_name] = {"ok": False, "error": type(e2).__name__ + ": " + str(e2)[:120]}
+            except Exception as e:
+                fin_results[func_name] = {"error": str(e)[:100]}
     except ImportError:
         fin_results["import"] = "akshare not installed"
 

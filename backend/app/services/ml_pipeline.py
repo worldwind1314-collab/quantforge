@@ -48,55 +48,116 @@ class MLPipeline:
         """Build training dataset from granular factors for ALL stocks with price data.
 
         Target: cross-sectional rank percentile of forward 20-day return.
-        Each stock is ranked against all other stocks on the same date,
-        producing a target in [0, 1].
 
-        Returns (X, y) as numpy arrays.
+        Optimizations:
+        - One bulk DB query for all price data (not per-stock)
+        - Forward returns computed in-memory from pre-loaded prices
+        - Bi-weekly snapshots to balance sample count vs computation
         """
         db = self._get_db()
 
-        # Get ALL stocks that have price data (not just those with financials)
+        # Get ALL stocks with price data
         quote_codes = sorted(
             r[0] for r in db.query(DailyQuote.code).distinct().all()
         )
         if not quote_codes:
             raise ValueError("No stocks with price data")
 
-        logger.info(f"Training universe: {len(quote_codes)} stocks with price data")
+        logger.info(f"Training universe: {len(quote_codes)} stocks")
+
+        # Load ALL price data in one bulk query
+        # Need: start_date - 1 year (for factor lookback) to end_date + 30 days (for forward return)
+        data_start = (date.fromisoformat(start_date) - timedelta(days=400)).isoformat()
+        data_end = (date.fromisoformat(end_date) + timedelta(days=40)).isoformat()
+
+        logger.info(f"Bulk-loading price data {data_start} ~ {data_end}...")
+        rows = (
+            db.query(DailyQuote)
+            .filter(
+                DailyQuote.code.in_(quote_codes),
+                DailyQuote.trade_date >= data_start,
+                DailyQuote.trade_date <= data_end,
+            )
+            .order_by(DailyQuote.code, DailyQuote.trade_date)
+            .all()
+        )
+        logger.info(f"Loaded {len(rows)} quote rows")
+
+        # Build per-stock DataFrames
+        price_data: dict[str, pd.DataFrame] = {}
+        for r in rows:
+            if r.code not in price_data:
+                price_data[r.code] = []
+            price_data[r.code].append({
+                "trade_date": r.trade_date, "open": r.open, "high": r.high,
+                "low": r.low, "close": r.close, "volume": r.volume,
+                "amount": r.amount, "turnover": r.turnover,
+            })
+
+        for code in price_data:
+            df = pd.DataFrame(price_data[code])
+            df = df.sort_values("trade_date").set_index("trade_date")
+            price_data[code] = df
+
+        logger.info(f"Built DataFrames for {len(price_data)} stocks")
+
+        # Bi-weekly snapshots (14 days) to reduce computation
+        snapshot_dates = []
+        current = date.fromisoformat(end_date)
+        start = date.fromisoformat(start_date)
+        while current >= start:
+            snapshot_dates.append(current.isoformat())
+            current -= timedelta(days=14)
+
+        logger.info(f"Computing factors for {len(snapshot_dates)} snapshots...")
 
         from .factor_engine import FactorEngine
 
-        engine = FactorEngine(db)
-
-        # Weekly snapshots over the date range
         all_samples = []
-        current = date.fromisoformat(end_date)
-        start = date.fromisoformat(start_date)
-
-        snapshot_dates = []
-        while current >= start:
-            snapshot_dates.append(current.isoformat())
-            current -= timedelta(days=7)
-
-        logger.info(f"Computing factors for {len(snapshot_dates)} weekly snapshots...")
+        engine = FactorEngine(db)
 
         for i, snap_date in enumerate(snapshot_dates):
             try:
-                factors_df = engine.compute_granular_factors(snap_date, codes=quote_codes)
+                # Build price data subset for this snapshot
+                # (1 year lookback from snap_date)
+                lookback_start = (date.fromisoformat(snap_date) - timedelta(days=365)).isoformat()
+                codes_for_snapshot = []
+                snapshot_prices = {}
+
+                for code, df in price_data.items():
+                    if snap_date in df.index:
+                        # Filter to 1-year lookback window
+                        mask = (df.index >= lookback_start) & (df.index <= snap_date)
+                        subset = df.loc[mask]
+                        if len(subset) >= 10:  # need min data for factors
+                            snapshot_prices[code] = subset
+                            codes_for_snapshot.append(code)
+
+                if len(codes_for_snapshot) < 50:
+                    continue
+
+                # Compute granular factors using pre-loaded prices
+                factors_df = engine.compute_granular_factors_from_prices(
+                    snap_date, codes_for_snapshot, snapshot_prices
+                )
+
                 if factors_df.empty:
                     continue
 
-                # Compute cross-sectional rank target for this date
+                # Compute forward returns from pre-loaded prices
                 forward_rets = {}
                 for code in factors_df.index:
-                    ret = self._get_forward_return(db, code, snap_date, horizon=20)
+                    df = price_data.get(code)
+                    if df is None:
+                        continue
+                    ret = self._forward_return_from_prices(df, snap_date, horizon=20)
                     if ret is not None:
                         forward_rets[code] = ret
 
                 if len(forward_rets) < 50:
                     continue
 
-                # Cross-sectional rank percentile (0 to 1)
+                # Cross-sectional rank percentile
                 ret_series = pd.Series(forward_rets)
                 ranks = ret_series.rank(pct=True)
 
@@ -112,13 +173,12 @@ class MLPipeline:
                     feats["trade_date"] = snap_date
                     all_samples.append(feats)
 
-                if (i + 1) % 10 == 0:
+                if (i + 1) % 5 == 0:
                     logger.info(f"  Snapshot {i+1}/{len(snapshot_dates)}: {snap_date}, "
-                                f"{len(forward_rets)} stocks with targets, "
-                                f"{len(all_samples)} total samples")
+                                f"{len(forward_rets)} stocks, {len(all_samples)} total samples")
 
             except Exception as e:
-                logger.debug(f"Snapshot {snap_date} failed: {e}")
+                logger.warning(f"Snapshot {snap_date} failed: {e}")
                 continue
 
         if len(all_samples) < 100:
@@ -128,8 +188,6 @@ class MLPipeline:
         X = df[FEATURE_COLS].values.astype(np.float32)
         y = df["target"].values.astype(np.float32)
 
-        # Fill NaN with 0 (LightGBM handles NaN natively, but this is safer for numpy)
-        # We'll pass NaN-aware to LightGBM
         logger.info(f"Training data: {len(X)} samples, {len(FEATURE_COLS)} features")
         logger.info(f"Target stats: mean={y.mean():.3f}, std={y.std():.3f}, "
                     f"min={y.min():.3f}, max={y.max():.3f}")
@@ -336,6 +394,26 @@ class MLPipeline:
             return {"regime": "unknown", "confidence": 0, "error": str(e)}
 
     # ── Helpers ────────────────────────────────────────────────────
+
+    @staticmethod
+    def _forward_return_from_prices(df: pd.DataFrame, trade_date: str, horizon: int = 20) -> float | None:
+        """Compute forward N-day return from pre-loaded price DataFrame."""
+        if df is None or trade_date not in df.index:
+            return None
+
+        close = df["close"]
+        idx = close.index.get_loc(trade_date)
+
+        if idx + horizon >= len(close):
+            return None
+
+        cur = close.iloc[idx]
+        fut = close.iloc[idx + horizon]
+
+        if pd.isna(cur) or pd.isna(fut) or cur <= 0 or fut <= 0:
+            return None
+
+        return (fut - cur) / cur * 100
 
     @staticmethod
     def _get_forward_return(db: Session, code: str, trade_date: str, horizon: int = 20) -> float | None:

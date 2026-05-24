@@ -251,6 +251,54 @@ class FactorEngine:
             w += 1
         return score / w if w > 0 else None
 
+    def compute_granular_factors_from_prices(
+        self, trade_date: str, codes: list[str], price_data: dict[str, pd.DataFrame]
+    ) -> pd.DataFrame:
+        """Compute granular factors using pre-loaded price data (avoids DB queries).
+
+        Args:
+            trade_date: The snapshot date.
+            codes: Stock codes to compute factors for.
+            price_data: {code: DataFrame} with trade_date index, pre-filtered to lookback window.
+
+        Returns DataFrame indexed by code with 17 factor columns.
+        """
+        db = self._get_db()
+
+        # Load financial indicators
+        from ..models.finance import FinancialIndicator
+
+        fi_rows = (
+            db.query(FinancialIndicator)
+            .filter(FinancialIndicator.code.in_(codes))
+            .all()
+        )
+        fi_map: dict = {}
+        for fi in fi_rows:
+            if fi.code not in fi_map:
+                fi_map[fi.code] = fi
+
+        rows = []
+        for code in codes:
+            factors = self._compute_stock_factors(
+                code, trade_date, price_data.get(code), fi_map.get(code)
+            )
+            factors["code"] = code
+            rows.append(factors)
+
+        result = pd.DataFrame(rows).set_index("code")
+
+        # Cross-sectional z-score normalization
+        for col in result.columns:
+            valid = result[col].dropna()
+            if len(valid) > 30:
+                mean, std = valid.mean(), valid.std()
+                if std > 0 and not np.isnan(std):
+                    result[col] = (result[col] - mean) / std
+                    result[col] = result[col].clip(-5, 5)
+
+        return result
+
     # ── Legacy factor computation (for dashboard / backward compat) ──
 
     def compute_all_factors(self, trade_date: str, codes: list[str] | None = None) -> pd.DataFrame:

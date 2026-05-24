@@ -295,7 +295,14 @@ def debug_connectivity():
                 else:
                     try:
                         df = fn(symbol="000001")
-                        fin_results[func_name] = {"ok": True, "rows": len(df) if df is not None else 0}
+                        if df is not None and not df.empty:
+                            fin_results[func_name] = {
+                                "ok": True, "rows": len(df),
+                                "columns": list(df.columns),
+                                "first_row": {str(k): str(v)[:80] for k, v in df.iloc[0].items()},
+                            }
+                        else:
+                            fin_results[func_name] = {"ok": True, "rows": 0}
                     except Exception as e2:
                         fin_results[func_name] = {"ok": False, "error": type(e2).__name__ + ": " + str(e2)[:120]}
             except Exception as e:

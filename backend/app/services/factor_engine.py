@@ -73,6 +73,9 @@ class FactorEngine:
 
         result = pd.DataFrame(factors).set_index("code")
 
+        # Replace None with np.nan for proper numeric operations
+        result = result.replace({None: np.nan}).astype(float)
+
         # Cross-sectional z-score normalization
         for col in result.columns:
             valid = result[col].dropna()
@@ -81,8 +84,8 @@ class FactorEngine:
                 if std > 0:
                     result[col] = (result[col] - mean) / std
 
-        # Composite: equal-weighted sum of normalized scores
-        result["composite_score"] = result.sum(axis=1, skipna=False)
+        # Composite: equal-weighted sum of normalized scores (skip NaN)
+        result["composite_score"] = result.sum(axis=1, skipna=True)
 
         return result
 
@@ -211,17 +214,18 @@ class FactorEngine:
 
         count = 0
         for code, row in factors.iterrows():
-            if pd.isna(row.get("composite_score")):
+            composite = row.get("composite_score")
+            if composite is None or (isinstance(composite, float) and np.isnan(composite)):
                 continue
             db.add(
                 FactorScore(
                     code=str(code),
                     trade_date=trade_date,
-                    value_score=row.get("value_score") if not pd.isna(row.get("value_score")) else None,
-                    quality_score=row.get("quality_score") if not pd.isna(row.get("quality_score")) else None,
-                    momentum_score=row.get("momentum_score") if not pd.isna(row.get("momentum_score")) else None,
-                    volatility_score=row.get("volatility_score") if not pd.isna(row.get("volatility_score")) else None,
-                    composite_score=row.get("composite_score"),
+                    value_score=_nativize(row.get("value_score")),
+                    quality_score=_nativize(row.get("quality_score")),
+                    momentum_score=_nativize(row.get("momentum_score")),
+                    volatility_score=_nativize(row.get("volatility_score")),
+                    composite_score=_nativize(composite),
                 )
             )
             count += 1
@@ -253,3 +257,16 @@ class FactorEngine:
             df = pd.DataFrame(records).sort_values("trade_date").set_index("trade_date")
             result[code] = df
         return result
+
+
+def _nativize(val) -> float | None:
+    """Convert numpy/pandas types to Python native float or None."""
+    if val is None:
+        return None
+    try:
+        if isinstance(val, (np.floating, np.integer)):
+            return float(val.item())
+        f = float(val)
+        return None if np.isnan(f) else f
+    except (ValueError, TypeError):
+        return None

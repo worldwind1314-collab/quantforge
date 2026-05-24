@@ -35,13 +35,14 @@ class MLPipeline:
     def prepare_training_data(
         self, start_date: str, end_date: str
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Build training dataset: factor scores as X, forward returns as y.
+        """Build training dataset: compute factors on-the-fly from daily_quotes,
+        using monthly snapshots to reduce computation.
 
         Returns (X, y) as numpy arrays.
         """
         db = self._get_db()
 
-        # Load factor scores
+        # Try pre-computed FactorScore first
         factors = (
             db.query(FactorScore)
             .filter(FactorScore.trade_date >= start_date, FactorScore.trade_date <= end_date)
@@ -49,44 +50,92 @@ class MLPipeline:
             .all()
         )
 
-        if len(factors) < 100:
-            raise ValueError(f"Not enough factor data: {len(factors)} rows")
+        if len(factors) >= 100:
+            return self._build_from_factors(db, factors)
 
-        # Build factor DataFrame
+        # Fallback: compute factors from daily_quotes for a subset of dates
+        logger.info("No pre-computed factors, computing from daily_quotes...")
+        return self._build_from_quotes(db, start_date, end_date)
+
+    def _build_from_factors(self, db: Session, factors: list) -> tuple[np.ndarray, np.ndarray]:
         factor_data = []
         for f in factors:
-            factor_data.append(
-                {
-                    "code": f.code,
-                    "trade_date": f.trade_date,
-                    "value": f.value_score or 0,
-                    "quality": f.quality_score or 0,
-                    "momentum": f.momentum_score or 0,
-                    "volatility": f.volatility_score or 0,
-                    "composite": f.composite_score or 0,
-                }
-            )
+            factor_data.append({
+                "code": f.code, "trade_date": f.trade_date,
+                "value": f.value_score or 0, "quality": f.quality_score or 0,
+                "momentum": f.momentum_score or 0, "volatility": f.volatility_score or 0,
+                "composite": f.composite_score or 0,
+            })
         df = pd.DataFrame(factor_data)
         df["trade_date"] = pd.to_datetime(df["trade_date"])
+        return self._build_features_labels(db, df)
 
-        # Compute forward returns (5-day and 20-day)
-        labels = []
-        features = []
+    def _build_from_quotes(self, db: Session, start_date: str, end_date: str) -> tuple[np.ndarray, np.ndarray]:
+        """Compute factors directly from daily_quotes using weekly snapshots."""
+        from .factor_engine import FactorEngine
 
+        engine = FactorEngine(db)
+
+        # Get stocks that have price data + financial data
+        from ..models.finance import FinancialIndicator
+
+        fi_codes = set(r[0] for r in db.query(FinancialIndicator.code).distinct().all())
+        quote_codes = set(r[0] for r in db.query(DailyQuote.code).distinct().all())
+        codes = list(fi_codes & quote_codes)
+
+        if not codes:
+            raise ValueError("No stocks with both financial and price data")
+
+        # Use weekly snapshots to maximize training samples from limited stock universe
+        from datetime import date, timedelta
+
+        all_data = []
+        current = date.fromisoformat(end_date)
+        start = date.fromisoformat(start_date)
+        while current >= start:
+            date_str = current.isoformat()
+            try:
+                factors = engine.compute_all_factors(date_str)
+                engine.save_factors(factors, date_str, db)
+                for code, row in factors.iterrows():
+                    if row.get("composite_score") is None:
+                        continue
+                    all_data.append({
+                        "code": str(code), "trade_date": date_str,
+                        "value": _nativize_ml(row.get("value_score")) or 0,
+                        "quality": _nativize_ml(row.get("quality_score")) or 0,
+                        "momentum": _nativize_ml(row.get("momentum_score")) or 0,
+                        "volatility": _nativize_ml(row.get("volatility_score")) or 0,
+                        "composite": _nativize_ml(row.get("composite_score")) or 0,
+                    })
+            except Exception as e:
+                logger.debug(f"No factor data for {date_str}: {e}")
+            current -= timedelta(days=7)
+
+        if len(all_data) < 50:
+            raise ValueError(f"Not enough training samples: {len(all_data)}")
+
+        df = pd.DataFrame(all_data)
+        df["trade_date"] = pd.to_datetime(df["trade_date"])
+        logger.info(f"Built {len(df)} training samples from daily_quotes")
+        return self._build_features_labels(db, df)
+
+    def _build_features_labels(self, db: Session, df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+        labels, features = [], []
         for _, row in df.iterrows():
             forward_ret = self._get_forward_return(
                 db, row["code"], row["trade_date"].strftime("%Y-%m-%d"), horizon=20
             )
             if forward_ret is not None:
-                features.append(
-                    [row["value"], row["quality"], row["momentum"], row["volatility"], row["composite"]]
-                )
+                features.append([
+                    row["value"], row["quality"], row["momentum"],
+                    row["volatility"], row["composite"],
+                ])
                 labels.append(forward_ret)
 
         if len(features) < 50:
             raise ValueError(f"Not enough training samples: {len(features)}")
 
-        # Remove outliers (top/bottom 1%)
         y = np.array(labels)
         lo, hi = np.percentile(y, [1, 99])
         mask = (y >= lo) & (y <= hi)
@@ -330,3 +379,16 @@ class MLPipeline:
                 )
             )
         db.commit()
+
+
+def _nativize_ml(val) -> float | None:
+    """Convert numpy types to Python native float or None."""
+    if val is None:
+        return None
+    try:
+        if hasattr(val, "item"):
+            return float(val.item())
+        f = float(val)
+        return None if np.isnan(f) else f
+    except (ValueError, TypeError):
+        return None

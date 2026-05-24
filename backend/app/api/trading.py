@@ -51,6 +51,12 @@ def list_strategies():
                 "description": "布林带下轨+RSI超卖买入，上轨+RSI超买卖出。",
                 "params": {"bb_window": 20, "rsi_window": 14, "rsi_oversold": 30, "rsi_overbought": 70},
             },
+            {
+                "id": "ml_multifactor",
+                "name": "ML多因子选股",
+                "description": "XGBoost模型基于价值/质量/动量/波动率因子预测收益，买入排名前N的股票。",
+                "params": {"top_n": 10, "sell_rank_threshold": 50},
+            },
         ]
     }
 

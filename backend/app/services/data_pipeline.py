@@ -66,6 +66,13 @@ class DataPipeline:
     # ── Daily quotes ───────────────────────────────────────────────
 
     @staticmethod
+    def _code_to_sina_symbol(code: str) -> str:
+        """Convert pure code to Sina symbol format: sz000001 or sh600519."""
+        if code.startswith(("6", "5")):
+            return "sh" + code
+        return "sz" + code
+
+    @staticmethod
     def fetch_daily_quotes(
         codes: list[str] | None = None,
         start_date: str | None = None,
@@ -84,18 +91,49 @@ class DataPipeline:
         results = {}
         errors = []
         for i, code in enumerate(codes):
+            df = None
+            em_error = None
+            # Try East Money API first (more complete data)
             try:
                 df = ak.stock_zh_a_hist(
                     symbol=code, period=period, start_date=start_date, end_date=end_date, adjust="qfq",
                 )
-                if not df.empty:
-                    results[code] = df
-                if (i + 1) % 50 == 0:
-                    logger.info(f"Fetched {i + 1}/{len(codes)} stocks")
+                if df is not None and not df.empty:
+                    # Normalize East Money column names
+                    df = df.rename(columns={
+                        "日期": "date", "开盘": "open", "收盘": "close",
+                        "最高": "high", "最低": "low", "成交量": "volume",
+                        "成交额": "amount", "振幅": "amplitude",
+                        "涨跌幅": "pct_change", "涨跌额": "change", "换手率": "turnover",
+                    })
             except Exception as e:
-                errors.append(f"{code}: {e}")
-                if i < 3:
-                    logger.warning(f"Failed to fetch {code}: {e}")
+                em_error = e
+
+            # Fallback: Sina API via stock_zh_a_daily
+            if df is None or df.empty:
+                try:
+                    sina_symbol = DataPipeline._code_to_sina_symbol(code)
+                    df = ak.stock_zh_a_daily(
+                        symbol=sina_symbol, start_date=start_date, end_date=end_date, adjust="qfq",
+                    )
+                    # Sina API returns English column names already
+                    if df is not None and not df.empty and "date" not in df.columns:
+                        df = df.rename(columns={
+                            "日期": "date", "开盘": "open", "收盘": "close",
+                            "最高": "high", "最低": "low", "成交量": "volume",
+                            "成交额": "amount", "振幅": "amplitude",
+                            "涨跌幅": "pct_change", "涨跌额": "change", "换手率": "turnover",
+                        })
+                except Exception as e2:
+                    errors.append(f"{code}: EM={em_error}, Sina={e2}")
+                    if i < 3:
+                        logger.warning(f"Failed to fetch {code}: EM={em_error}, Sina={e2}")
+                    continue
+
+            if df is not None and not df.empty:
+                results[code] = df
+            if (i + 1) % 50 == 0:
+                logger.info(f"Fetched {i + 1}/{len(codes)} stocks")
 
         if errors:
             logger.warning(f"Failed to fetch {len(errors)}/{len(codes)} stocks. First errors: {errors[:3]}")
@@ -114,27 +152,27 @@ class DataPipeline:
             total = 0
             for code, df in data.items():
                 for _, row in df.iterrows():
-                    trade_date = str(row.get("日期", "")).strip()
+                    trade_date = _get_col(row, "date", "日期")
                     if not trade_date:
                         continue
 
                     stmt = text("DELETE FROM daily_quotes WHERE code = :code AND trade_date = :td")
-                    db.execute(stmt, {"code": code, "td": trade_date})
+                    db.execute(stmt, {"code": code, "td": str(trade_date).strip()})
 
                     db.add(
                         DailyQuote(
                             code=code,
-                            trade_date=trade_date,
-                            open=_safe_float(row.get("开盘")),
-                            high=_safe_float(row.get("最高")),
-                            low=_safe_float(row.get("最低")),
-                            close=_safe_float(row.get("收盘")),
-                            volume=_safe_float(row.get("成交量")),
-                            amount=_safe_float(row.get("成交额")),
-                            amplitude=_safe_float(row.get("振幅")),
-                            pct_change=_safe_float(row.get("涨跌幅")),
-                            change=_safe_float(row.get("涨跌额")),
-                            turnover=_safe_float(row.get("换手率")),
+                            trade_date=str(trade_date).strip(),
+                            open=_safe_float(_get_col(row, "open", "开盘")),
+                            high=_safe_float(_get_col(row, "high", "最高")),
+                            low=_safe_float(_get_col(row, "low", "最低")),
+                            close=_safe_float(_get_col(row, "close", "收盘")),
+                            volume=_safe_float(_get_col(row, "volume", "成交量")),
+                            amount=_safe_float(_get_col(row, "amount", "成交额")),
+                            amplitude=_safe_float(_get_col(row, "amplitude", "振幅")),
+                            pct_change=_safe_float(_get_col(row, "pct_change", "涨跌幅")),
+                            change=_safe_float(_get_col(row, "change", "涨跌额")),
+                            turnover=_safe_float(_get_col(row, "turnover", "换手率")),
                         )
                     )
                     total += 1
@@ -246,6 +284,14 @@ class DataPipeline:
 
 
 # ── Helpers ────────────────────────────────────────────────────────
+
+def _get_col(row, en_key: str, cn_key: str):
+    """Get value from row using English or Chinese column name."""
+    val = row.get(en_key)
+    if val is not None:
+        return val
+    return row.get(cn_key)
+
 
 def _safe_float(val) -> float | None:
     if val is None:

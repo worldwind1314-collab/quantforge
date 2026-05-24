@@ -35,29 +35,28 @@ class MLPipeline:
     def prepare_training_data(
         self, start_date: str, end_date: str
     ) -> tuple[np.ndarray, np.ndarray]:
-        """Build training dataset: compute factors on-the-fly from daily_quotes,
-        using monthly snapshots to reduce computation.
+        """Build training dataset: compute factors from daily_quotes,
+        using weekly snapshots to reduce computation.
 
         Returns (X, y) as numpy arrays.
         """
         db = self._get_db()
 
-        # Try pre-computed FactorScore first
-        factors = (
-            db.query(FactorScore)
-            .filter(FactorScore.trade_date >= start_date, FactorScore.trade_date <= end_date)
-            .order_by(FactorScore.trade_date, FactorScore.code)
-            .all()
-        )
-
-        # Need enough samples AND enough distinct dates to capture temporal patterns
-        distinct_dates = len({f.trade_date for f in factors})
-        if len(factors) >= 100 and distinct_dates >= 10:
-            return self._build_from_factors(db, factors)
-
-        # Fallback: compute factors from daily_quotes for a subset of dates
-        logger.info("No pre-computed factors, computing from daily_quotes...")
-        return self._build_from_quotes(db, start_date, end_date)
+        # Always compute factors from daily_quotes to ensure consistent coverage.
+        # FactorScore table may have sparse/inconsistent data.
+        try:
+            return self._build_from_quotes(db, start_date, end_date)
+        except ValueError:
+            # Fallback: try pre-computed FactorScore
+            factors = (
+                db.query(FactorScore)
+                .filter(FactorScore.trade_date >= start_date, FactorScore.trade_date <= end_date)
+                .order_by(FactorScore.trade_date, FactorScore.code)
+                .all()
+            )
+            if len(factors) >= 50:
+                return self._build_from_factors(db, factors)
+            raise ValueError(f"Not enough factor data: {len(factors)} rows")
 
     def _build_from_factors(self, db: Session, factors: list) -> tuple[np.ndarray, np.ndarray]:
         factor_data = []

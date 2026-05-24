@@ -132,10 +132,15 @@ def trigger_sync(
     fi_codes = [r[0] for r in db.query(FinancialIndicator.code).distinct().all()]
     fi_intersect = [c for c in code_list if c in fi_codes]
 
+    # Also sync financial indicators
+    fin_count = DataPipeline.sync_financial_indicators(code_list, db)
+    db.commit()
+
     return {
         "stocks_requested": len(code_list),
         "stocks_fetched": len(quotes_data),
         "total_quotes_saved": quote_count,
+        "financial_synced": fin_count,
         "date_range": f"{start_date} ~ {end_date}",
         "stocks_with_financials": len(fi_intersect),
     }

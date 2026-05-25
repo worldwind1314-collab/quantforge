@@ -1,0 +1,11 @@
+[Unit]
+Description=QuantForge daily data pipeline
+After=network.target postgresql.service
+
+[Service]
+Type=oneshot
+ExecStart=/var/www/quantforge/scripts/run_pipeline.sh
+User=root
+Group=root
+StandardOutput=append:/var/log/quantforge-pipeline.log
+StandardError=append:/var/log/quantforge-pipeline.log

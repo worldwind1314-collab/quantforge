@@ -32,15 +32,61 @@ jobs:
         run: |
           ssh -o StrictHostKeyChecking=no -i ~/.ssh/deploy_key \
             root@${{ secrets.SSH_HOST }} "
-            mkdir -p /var/www/quantforge
-            cd /var/www/quantforge
+            set -e
+            DEPLOY_DIR=/var/www/quantforge
+            BACKUP_DIR=/var/backups/quantforge-\$(date +%Y%m%d-%H%M%S)
+
+            # ── Pre-deploy backup ──
+            echo 'Backing up current deployment...'
+            if [ -d \$DEPLOY_DIR/backend ]; then
+              mkdir -p \$BACKUP_DIR
+              cp -r \$DEPLOY_DIR/backend \$BACKUP_DIR/backend
+              cp -r \$DEPLOY_DIR/scripts \$BACKUP_DIR/scripts 2>/dev/null || true
+              echo \"Backup saved to \$BACKUP_DIR\"
+            fi
+
+            # ── Deploy new code ──
+            mkdir -p \$DEPLOY_DIR
+            cd \$DEPLOY_DIR
             tar -xzf /tmp/deploy.tar.gz
             rm /tmp/deploy.tar.gz
+
+            # ── Install dependencies ──
             cd backend
             python3 -m venv venv 2>/dev/null || true
             venv/bin/pip install -r requirements.txt -q 2>&1 | tail -1
+
+            # ── Restart service ──
             systemctl restart quantforge-api
-            sleep 2
-            systemctl is-active quantforge-api
-            echo Deploy completed at \$(date)
+            sleep 3
+
+            # ── Health check via API endpoint ──
+            echo 'Running health checks...'
+            HTTP_CODE=\$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8000/api/health || echo '000')
+            if [ \"\$HTTP_CODE\" != \"200\" ]; then
+              echo \"ERROR: Health check returned HTTP \$HTTP_CODE — rolling back!\"
+              # Restore from backup
+              if [ -d \$BACKUP_DIR/backend ]; then
+                rm -rf \$DEPLOY_DIR/backend
+                cp -r \$BACKUP_DIR/backend \$DEPLOY_DIR/backend
+                systemctl restart quantforge-api
+                echo \"Rollback complete from \$BACKUP_DIR\"
+              fi
+              exit 1
+            fi
+            echo \"Health check passed (HTTP \$HTTP_CODE)\"
+
+            # Also check the DB-connected health endpoint
+            PIPELINE_STATUS=\$(curl -s http://localhost:8000/api/market/pipeline/status 2>/dev/null || echo '{\"status\":\"unreachable\"}')
+            echo \"Pipeline status: \$PIPELINE_STATUS\"
+
+            # ── Install pipeline systemd timer ──
+            cp ../scripts/quantforge-pipeline.service /etc/systemd/system/ 2>/dev/null || true
+            cp ../scripts/quantforge-pipeline.timer /etc/systemd/system/ 2>/dev/null || true
+            systemctl daemon-reload
+            systemctl enable quantforge-pipeline.timer 2>/dev/null || true
+            systemctl start quantforge-pipeline.timer 2>/dev/null || true
+            systemctl is-active quantforge-pipeline.timer 2>/dev/null || echo 'pipeline timer not active (may need .service/.timer files)'
+
+            echo \"Deploy completed at \$(date)\"
           "

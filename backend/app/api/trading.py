@@ -1,6 +1,11 @@
 """Trading API — backtesting, paper trading, ML pipeline, strategy management."""
 
-from fastapi import APIRouter, Depends, Query
+import json
+import threading
+from datetime import date as date_type, timedelta as td
+
+from dateutil.relativedelta import relativedelta
+from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.orm import Session
 
 from ..core.database import get_db
@@ -15,7 +20,8 @@ from ..services.strategies.ma_crossover import MACrossoverStrategy
 from ..services.strategies.mean_reversion import MeanReversionStrategy
 from ..services.strategies.ml_strategy import MLStrategy
 from ..services.strategies.momentum_breakout import MomentumBreakoutStrategy
-from ..services.strategy_engine import StrategyConfig
+from ..services.strategy_engine import Signal, SignalType, StrategyConfig
+from ..services.universe import get_universe, get_multi_sector_stocks
 
 router = APIRouter(prefix="/trading", tags=["trading"])
 
@@ -66,7 +72,10 @@ def list_strategies():
 @router.post("/backtest")
 def run_backtest(
     strategy_id: str = Query(..., description="策略ID"),
-    codes: str = Query("000001,600519,002594,300750,000858", description="股票代码 逗号分隔"),
+    codes: str = Query(
+        "000001,600519,002594,300750,000858,601318,600036,000333,601166,600900,"
+        "002415,600276,000651,601012,600887,002714,000725,300059,601398,600030",
+        description="股票代码 逗号分隔"),
     start_date: str = Query("2025-01-01", description="起始日期"),
     end_date: str = Query("2026-05-23", description="结束日期"),
     initial_capital: float = Query(100_000, description="初始资金"),
@@ -78,11 +87,11 @@ def run_backtest(
     """运行回测并返回报告。结果自动保存到数据库。"""
     strategy_cls = STRATEGY_MAP.get(strategy_id)
     if not strategy_cls:
-        return {"error": f"Unknown strategy: {strategy_id}", "available": list(STRATEGY_MAP.keys())}
+        raise HTTPException(status_code=400, detail=f"Unknown strategy: {strategy_id}")
 
     code_list = [c.strip() for c in codes.split(",") if c.strip()]
-    if not code_list:
-        code_list = [r[0] for r in db.query(Stock.code).filter(Stock.is_active == True).limit(10).all()]
+    if not code_list or codes == "auto":
+        code_list = get_universe(db, name="liquid_100")
 
     config = StrategyConfig(
         name=strategy_id,
@@ -98,7 +107,7 @@ def run_backtest(
     elif strategy_id == "mean_reversion":
         strategy = MeanReversionStrategy(bb_window=lookback, config=config)
     else:
-        return {"error": f"Strategy not configured: {strategy_id}"}
+        raise HTTPException(status_code=400, detail=f"Strategy not configured: {strategy_id}")
 
     engine = BacktestEngine(db)
     report = engine.run(strategy, code_list, start_date, end_date, initial_capital)
@@ -123,6 +132,177 @@ def run_backtest(
         },
         "trades": report.trades[:20],
         "equity_curve": report.daily_values,
+    }
+
+
+@router.post("/backtest/grid")
+def grid_search_backtest(
+    strategy_id: str = Query(...),
+    codes: str = Query(
+        "000001,600519,002594,300750,000858,601318,600036,000333,601166,600900,"
+        "002415,600276,000651,601012,600887,002714,000725,300059,601398,600030",
+        description="股票代码 逗号分隔"),
+    start_date: str = Query("2025-01-01"),
+    end_date: str = Query("2026-05-23"),
+    initial_capital: float = Query(100_000),
+    db: Session = Depends(get_db),
+):
+    """Run parameter grid search for a strategy. Returns results sorted by Sharpe ratio."""
+    strategy_cls = STRATEGY_MAP.get(strategy_id)
+    if not strategy_cls:
+        raise HTTPException(status_code=400, detail=f"Unknown strategy: {strategy_id}")
+
+    code_list = [c.strip() for c in codes.split(",") if c.strip()]
+    if not code_list or codes == "auto":
+        code_list = get_universe(db, name="liquid_100")
+
+    param_grids = {
+        "ma_crossover": [
+            {"fast": f, "slow": s}
+            for f in [5, 10, 20]
+            for s in [20, 30, 60]
+            if f < s
+        ],
+        "momentum_breakout": [
+            {"lookback": lb} for lb in [10, 20, 30, 60]
+        ],
+        "mean_reversion": [
+            {"bb_window": w, "rsi_window": 14, "rsi_oversold": 30, "rsi_overbought": 70}
+            for w in [10, 20, 30]
+        ],
+    }
+
+    config = StrategyConfig(name=strategy_id, initial_capital=initial_capital, max_position_pct=0.2, max_positions=5)
+    engine = BacktestEngine(db)
+    results = []
+
+    for params in param_grids.get(strategy_id, [{}]):
+        try:
+            if strategy_id == "ma_crossover":
+                strategy = MACrossoverStrategy(fast=params["fast"], slow=params["slow"], config=config)
+            elif strategy_id == "momentum_breakout":
+                strategy = MomentumBreakoutStrategy(lookback=params["lookback"], config=config)
+            elif strategy_id == "mean_reversion":
+                strategy = MeanReversionStrategy(bb_window=params["bb_window"], config=config)
+            else:
+                continue
+
+            report = engine.run(strategy, code_list, start_date, end_date, initial_capital)
+            result_id = save_backtest_result(db, report)
+            results.append({
+                "id": result_id,
+                "params": params,
+                "total_return": report.total_return,
+                "sharpe_ratio": report.sharpe_ratio,
+                "max_drawdown": report.max_drawdown,
+                "win_rate": report.win_rate,
+                "total_trades": report.total_trades,
+            })
+        except Exception as e:
+            results.append({"params": params, "error": str(e)})
+
+    results.sort(key=lambda r: r.get("sharpe_ratio", -999) or -999, reverse=True)
+    return {
+        "strategy": strategy_id,
+        "grid_size": len(param_grids.get(strategy_id, [])),
+        "results": results,
+    }
+
+
+@router.post("/backtest/walkforward")
+def walkforward_backtest(
+    strategy_id: str = Query(...),
+    codes: str = Query(
+        "000001,600519,002594,300750,000858,601318,600036,000333,601166,600900,"
+        "002415,600276,000651,601012,600887,002714,000725,300059,601398,600030",
+        description="股票代码 逗号分隔"),
+    total_start: str = Query("2024-01-01"),
+    total_end: str = Query("2026-05-23"),
+    train_months: int = Query(6, ge=3, le=12, description="训练窗口月数"),
+    test_months: int = Query(3, ge=1, le=6, description="测试窗口月数"),
+    initial_capital: float = Query(100_000),
+    db: Session = Depends(get_db),
+):
+    """Walking-forward cross-validation backtest.
+
+    Slides a train/test window forward through time to evaluate
+    strategy robustness across different market regimes.
+    """
+    strategy_cls = STRATEGY_MAP.get(strategy_id)
+    if not strategy_cls:
+        raise HTTPException(status_code=400, detail=f"Unknown strategy: {strategy_id}")
+
+    code_list = [c.strip() for c in codes.split(",") if c.strip()]
+    if not code_list or codes == "auto":
+        code_list = get_universe(db, name="liquid_100")
+    config = StrategyConfig(name=strategy_id, initial_capital=initial_capital, max_position_pct=0.2, max_positions=5)
+
+    # Build time windows
+    cursor = date_type.fromisoformat(total_start)
+    end = date_type.fromisoformat(total_end)
+    windows = []
+
+    # Advance by test_months each step
+    while True:
+        train_start = cursor
+        train_end = cursor + relativedelta(months=train_months) - td(days=1)
+        test_end = train_end + relativedelta(months=test_months)
+        if test_end > end:
+            test_end = end
+        if train_end >= end or (test_end - train_end - td(days=1)).days < 20:
+            break
+        windows.append({
+            "train": f"{train_start.isoformat()} ~ {train_end.isoformat()}",
+            "test_start": (train_end + td(days=1)).isoformat(),
+            "test_end": test_end.isoformat(),
+        })
+        # Slide forward by test_months
+        cursor = cursor + relativedelta(months=test_months)
+        if cursor >= end:
+            break
+
+    if not windows:
+        raise HTTPException(status_code=400, detail="Not enough data for walkforward windows. Expand total_start/total_end range.")
+
+    engine = BacktestEngine(db)
+    results = []
+    for w in windows:
+        try:
+            if strategy_id == "ma_crossover":
+                strategy = MACrossoverStrategy(fast=10, slow=30, config=config)
+            elif strategy_id == "momentum_breakout":
+                strategy = MomentumBreakoutStrategy(lookback=20, config=config)
+            elif strategy_id == "mean_reversion":
+                strategy = MeanReversionStrategy(bb_window=20, config=config)
+            else:
+                continue
+
+            report = engine.run(strategy, code_list, w["test_start"], w["test_end"], initial_capital)
+            result_id = save_backtest_result(db, report)
+            results.append({
+                "window": f"{w['test_start']} ~ {w['test_end']}",
+                "train_window": w["train"],
+                "result_id": result_id,
+                "total_return": report.total_return,
+                "sharpe_ratio": report.sharpe_ratio,
+                "max_drawdown": report.max_drawdown,
+                "win_rate": report.win_rate,
+                "total_trades": report.total_trades,
+            })
+        except Exception as e:
+            results.append({"window": f"{w['test_start']} ~ {w['test_end']}", "error": str(e)})
+
+    valid = [r for r in results if "sharpe_ratio" in r and r["sharpe_ratio"] is not None]
+    mean_sharpe = sum(r["sharpe_ratio"] for r in valid) / len(valid) if valid else 0
+    mean_return = sum(r["total_return"] for r in valid) / len(valid) if valid else 0
+
+    return {
+        "strategy": strategy_id,
+        "n_windows": len(windows),
+        "n_successful": len(valid),
+        "mean_sharpe": round(mean_sharpe, 3),
+        "mean_return": round(mean_return, 2),
+        "results": results,
     }
 
 
@@ -162,9 +342,7 @@ def get_backtest(result_id: int, db: Session = Depends(get_db)):
     """获取单个回测结果的完整数据（含权益曲线和交易记录）。"""
     r = db.query(BacktestResultModel).filter(BacktestResultModel.id == result_id).first()
     if not r:
-        return {"error": "Result not found"}
-
-    import json
+        raise HTTPException(status_code=404, detail="Result not found")
 
     return {
         "id": r.id,
@@ -262,6 +440,17 @@ def get_factors(
 # ── ML Pipeline ────────────────────────────────────────────────────
 
 _ml_pipeline: MLPipeline | None = None
+_ml_lock = threading.Lock()
+
+
+def _get_ml_pipeline(db: Session) -> MLPipeline:
+    """Thread-safe access to the global ML pipeline singleton."""
+    global _ml_pipeline
+    with _ml_lock:
+        if _ml_pipeline is None:
+            _ml_pipeline = MLPipeline(db)
+            _ml_pipeline.train()
+        return _ml_pipeline
 
 
 @router.post("/ml/train")
@@ -275,11 +464,12 @@ def ml_train(
     try:
         pipeline = MLPipeline(db)
         metrics = pipeline.train(start_date, end_date)
-        _ml_pipeline = pipeline
+        with _ml_lock:
+            _ml_pipeline = pipeline
         return {"status": "trained", "metrics": metrics}
     except Exception as e:
         import traceback
-        return {"error": str(e), "traceback": traceback.format_exc()}
+        raise HTTPException(status_code=500, detail=f"{e}\n{str(traceback.format_exc())}")
 
 
 @router.post("/ml/predict")
@@ -289,18 +479,12 @@ def ml_predict(
     db: Session = Depends(get_db),
 ):
     """使用已训练模型为某日生成股票排名预测。"""
-    global _ml_pipeline
-    if _ml_pipeline is None:
-        # Try to train automatically
-        pipeline = MLPipeline(db)
-        pipeline.train()
-        _ml_pipeline = pipeline
-
     try:
-        predictions = _ml_pipeline.predict(trade_date, top_n)
+        pipeline = _get_ml_pipeline(db)
+        predictions = pipeline.predict(trade_date, top_n)
         return {"trade_date": trade_date, "top_n": top_n, "predictions": predictions}
     except ValueError as e:
-        return {"error": str(e), "hint": "先确保该日有因子数据: POST /api/trading/factors/compute?trade_date=" + trade_date}
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("/ml/predictions/{trade_date}")
@@ -353,13 +537,11 @@ def run_ml_backtest(
     db: Session = Depends(get_db),
 ):
     """使用 ML 策略运行回测。需要先训练模型和计算因子。"""
-    global _ml_pipeline
-    if _ml_pipeline is None:
-        pipeline = MLPipeline(db)
-        pipeline.train()
-        _ml_pipeline = pipeline
+    pipeline = _get_ml_pipeline(db)
 
     code_list = [c.strip() for c in codes.split(",") if c.strip()]
+    if not code_list or codes == "auto":
+        code_list = get_universe(db, name="liquid_100")
 
     engine = BacktestEngine(db)
     config = StrategyConfig(name="ml_multifactor", initial_capital=initial_capital, max_position_pct=0.15, max_positions=top_n)
@@ -383,7 +565,7 @@ def run_ml_backtest(
         })
 
     if not predictions_by_date:
-        return {"error": "No ML predictions available. Run /api/trading/factors/compute and /api/trading/ml/predict first."}
+        raise HTTPException(status_code=400, detail="No ML predictions available. Run /api/trading/factors/compute and /api/trading/ml/predict first.")
 
     # Create a strategy that uses these predictions
     class CachedMLStrategy(MLStrategy):
@@ -402,11 +584,10 @@ def run_ml_backtest(
                 if code not in data:
                     continue
                 if code in buy_codes:
-                    signals.append(Signal(code=code, date=current_date, signal_type="BUY", weight=r.get("confidence", 0.5),
+                    signals.append(Signal(code=code, date=current_date, signal_type=SignalType.BUY, weight=r.get("confidence", 0.5),
                         reason=f"ML rank #{r['prediction_rank']}, pred={r['predicted_return']:.2f}%"))
             return signals
 
-    from ..services.strategy_engine import Signal, SignalType
     strategy = CachedMLStrategy(predictions_by_date, top_n, config)
     report = engine.run(strategy, code_list, start_date, end_date, initial_capital)
     result_id = save_backtest_result(db, report)

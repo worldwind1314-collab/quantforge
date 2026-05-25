@@ -8,8 +8,11 @@ import sys
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
+from pathlib import Path
 
-sys.path.insert(0, ".")
+# Resolve project root from script location
+_project_root = Path(__file__).resolve().parent.parent / "backend"
+sys.path.insert(0, str(_project_root))
 
 from app.core.database import SessionLocal, engine
 from app.models.stock import Stock

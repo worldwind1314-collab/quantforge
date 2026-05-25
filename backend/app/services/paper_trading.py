@@ -201,14 +201,14 @@ class PaperTradingService:
             pos.market_value = pos.quantity * price
             pos.unrealized_pnl = (price - pos.avg_cost) * pos.quantity
 
-        pnl = proceeds - pos.avg_cost * qty if pos.quantity > 0 else (price - pos.avg_cost) * qty
+        realized_pnl = (price - pos.avg_cost) * qty  # consistent PnL calculation
         return {
             "code": sig.code,
             "action": "SELL",
             "quantity": qty,
             "price": price,
             "proceeds": round(proceeds, 2),
-            "pnl": round(pnl, 2) if pos.quantity > 0 else round((price - pos.avg_cost) * qty, 2),
+            "pnl": round(realized_pnl, 2),
             "reason": sig.reason,
         }
 
@@ -220,11 +220,8 @@ class PaperTradingService:
 
     @staticmethod
     def _trade_cost(price: float, quantity: int, direction: str) -> float:
-        value = price * quantity
-        commission = max(value * 0.00025, 5.0)
-        stamp = value * 0.0005 if direction == "SELL" else 0
-        slippage = value * 0.001
-        return commission + stamp + slippage
+        from .backtest_engine import trade_cost
+        return trade_cost(price, quantity, direction)
 
     @staticmethod
     def _update_account_value(db: Session, account: PaperAccount):

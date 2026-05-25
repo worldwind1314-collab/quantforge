@@ -1,6 +1,6 @@
 """Daily market quote (K-line) table."""
 
-from sqlalchemy import BigInteger, Date, Float, String
+from sqlalchemy import BigInteger, Date, Float, String, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..core.database import Base
@@ -8,6 +8,7 @@ from ..core.database import Base
 
 class DailyQuote(Base):
     __tablename__ = "daily_quotes"
+    __table_args__ = (UniqueConstraint("code", "trade_date", name="uq_daily_quotes_code_date"),)
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
     code: Mapped[str] = mapped_column(String(12), nullable=False, index=True, comment="股票代码")

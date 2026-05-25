@@ -15,12 +15,38 @@ from ..models.stock import Stock
 
 logger = logging.getLogger(__name__)
 
-# Feature columns produced by FactorEngine.compute_granular_factors()
+# Feature columns produced by FactorEngine.compute_granular_factors() (~65 Alpha158-inspired factors)
 FEATURE_COLS = [
+    # Momentum (8)
     "mom_5d", "mom_10d", "mom_20d", "mom_60d", "mom_120d",
-    "vol_5d", "vol_20d", "vol_60d",
+    "roc_6", "roc_14", "roc_30",
+    # Volatility (4)
+    "vol_5d", "vol_10d", "vol_20d", "vol_60d",
+    # Turnover (6)
     "turnover_5d", "turnover_20d", "vol_ratio_5_20",
+    "turn_ma5_ratio", "turn_ma10_ratio", "turn_ma20_ratio",
+    # Volume (7)
+    "vma5_ratio", "vma10_ratio", "vma20_ratio",
+    "vstd5", "vstd20",
+    "amount_ma5_ratio", "amount_ma10_ratio",
+    # K-line pattern (6)
+    "k_mid", "k_len", "k_up", "k_down", "k_sft", "k_ym1",
+    # Price deviation (12)
+    "ma5_ratio", "ma10_ratio", "ma20_ratio", "ma60_ratio",
+    "std5_ratio", "std10_ratio", "std20_ratio",
+    "max5_ratio", "max20_ratio", "min5_ratio", "min20_ratio",
+    "price_position_60d",
+    # Distance from high/low (6)
+    "imax5", "imax20", "imax60",
+    "imin5", "imin20", "imin60",
+    # RSV / Technical (18)
+    "rsv_9", "rsv_14", "rsv_20",
     "rsi_14", "price_position_20d", "max_dd_20d", "max_dd_60d",
+    "macd_dif", "macd_dea", "macd_hist",
+    "kdj_k", "kdj_d", "kdj_j",
+    "boll_pos", "boll_width", "wr_14", "cci_14",
+    "amplitude_5d", "amplitude_20d",
+    # Fundamental (2)
     "value_score", "quality_score",
 ]
 
@@ -240,6 +266,9 @@ class MLPipeline:
             callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(20)],
         )
 
+        # Compute per-sample prediction variance for confidence calibration
+        self._calibrate_confidence(X_val)
+
         # Evaluate
         pred_train = self._model.predict(X_train)
         pred_val = self._model.predict(X_val)
@@ -282,6 +311,57 @@ class MLPipeline:
         logger.info(f"Model trained: IC={val_ic:.4f}, best_iter={self._model.best_iteration_}")
         return metrics
 
+    # ── Confidence calibration ─────────────────────────────────────
+
+    def _calibrate_confidence(self, X_val: np.ndarray):
+        """Compute prediction std from per-tree leaf variance on validation set.
+
+        Uses the raw booster to get per-tree predictions, then computes
+        the standard deviation across trees as an uncertainty measure.
+        Stores the 95th percentile of std as the normalization factor.
+        """
+        try:
+            booster = self._model.booster_
+            # Get per-tree predictions for validation set
+            tree_preds = []
+            for tidx in range(booster.num_trees()):
+                tpred = booster.predict(X_val, start_iteration=tidx, num_iteration=1)
+                tree_preds.append(tpred)
+            tree_preds = np.column_stack(tree_preds)
+            # Std across trees = prediction uncertainty
+            stds = np.std(tree_preds, axis=1)
+            self._conf_p95 = float(np.percentile(stds, 95))
+            self._conf_trained = True
+            logger.info(f"Confidence calibrated: p95_std={self._conf_p95:.4f}")
+        except Exception as e:
+            logger.warning(f"Confidence calibration failed, using fallback: {e}")
+            self._conf_p95 = 0.1
+            self._conf_trained = False
+
+    def _compute_confidence(self, X: np.ndarray) -> np.ndarray:
+        """Compute per-sample confidence from tree prediction variance.
+
+        Lower variance across trees = higher confidence.
+        Maps std → [0.3, 1.0] range via exponential decay.
+        """
+        if not getattr(self, '_conf_trained', False) or self._model is None:
+            return np.full(len(X), 0.5)
+
+        try:
+            booster = self._model.booster_
+            tree_preds = []
+            for tidx in range(booster.num_trees()):
+                tpred = booster.predict(X, start_iteration=tidx, num_iteration=1)
+                tree_preds.append(tpred)
+            tree_preds = np.column_stack(tree_preds)
+            stds = np.std(tree_preds, axis=1)
+            # Normalize: lower std → higher confidence
+            norm_factor = max(self._conf_p95, 1e-6)
+            confidence = np.exp(-stds / norm_factor)
+            return np.clip(confidence, 0.3, 1.0)
+        except Exception:
+            return np.full(len(X), 0.5)
+
     # ── Prediction ─────────────────────────────────────────────────
 
     def predict(self, trade_date: str, top_n: int = 30) -> list[dict]:
@@ -321,18 +401,19 @@ class MLPipeline:
             X[i] = feats
             valid_codes.append(code)
 
-        # Fill NaN with 0 for prediction (LightGBM handles NaN but some versions don't)
+        # Fill NaN with 0 for prediction
         X = np.nan_to_num(X, nan=0.0)
         preds = self._model.predict(X)
+        confidences = self._compute_confidence(X)
 
         # Build results
         results = []
-        for code, pred in zip(valid_codes, preds):
+        for code, pred, conf in zip(valid_codes, preds, confidences):
             results.append({
                 "code": code,
                 "trade_date": trade_date,
                 "predicted_return": round(float(pred), 4),
-                "confidence": 0.5,  # simplified
+                "confidence": round(float(conf), 4),
             })
 
         results.sort(key=lambda x: x["predicted_return"], reverse=True)
@@ -397,6 +478,37 @@ class MLPipeline:
         except Exception as e:
             logger.warning(f"Regime detection failed: {e}")
             return {"regime": "unknown", "confidence": 0, "error": str(e)}
+
+    # ── Bulk prediction (for rolling training) ────────────────────
+
+    def predict_for_range(self, start_date: str, end_date: str, interval_days: int = 5) -> pd.DataFrame:
+        """Generate predictions for all trading dates in a range.
+
+        Returns DataFrame with columns: code, trade_date, predicted_return.
+        Used by RollingTrainer for out-of-sample prediction stitching.
+        """
+        db = self._get_db()
+
+        trading_dates = sorted(
+            r[0] for r in db.query(DailyQuote.trade_date)
+            .filter(DailyQuote.trade_date >= start_date, DailyQuote.trade_date <= end_date)
+            .distinct()
+            .all()
+        )
+
+        all_preds = []
+        for td in trading_dates[::interval_days]:
+            try:
+                preds = self.predict(td, top_n=500)
+                all_preds.extend(preds)
+            except Exception as e:
+                logger.warning(f"Prediction for {td} failed: {e}")
+                continue
+
+        if not all_preds:
+            return pd.DataFrame()
+
+        return pd.DataFrame(all_preds)
 
     # ── Helpers ────────────────────────────────────────────────────
 

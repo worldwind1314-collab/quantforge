@@ -14,7 +14,7 @@
         <thead>
             <tr>
                 <th>排名</th><th>代码</th><th>名称</th>
-                <th>预测收益率</th><th>置信度</th>
+                <th>排名得分</th><th>置信度</th>
                 <th>价值因子</th><th>质量因子</th><th>动量因子</th><th>波动率</th><th>综合得分</th>
             </tr>
         </thead>
@@ -24,8 +24,8 @@
             <td><span class="badge {% if p.prediction_rank and p.prediction_rank <= 10 %}badge-purple{% elif p.prediction_rank and p.prediction_rank <= 30 %}badge-green{% else %}badge-orange{% endif %}">#{{ p.prediction_rank }}</span></td>
             <td><strong>{{ p.code }}</strong></td>
             <td>{{ p.name or '-' }}</td>
-            <td style="color: {% if p.predicted_return and p.predicted_return > 0 %}var(--green){% else %}var(--red){% endif %}">
-                {{ "%+.2f%%" % (p.predicted_return * 100) if p.predicted_return is not none else '-' }}
+            <td style="color: {% if p.predicted_return and p.predicted_return > 0.5 %}var(--green){% else %}var(--red){% endif %}">
+                {{ "%.4f" % p.predicted_return if p.predicted_return is not none else '-' }}
             </td>
             <td>{{ ("%.2f" % p.confidence) if p.confidence is not none else '-' }}</td>
             <td>{{ ("%.2f" % p.value_score) if p.value_score is not none else '-' }}</td>
@@ -73,7 +73,7 @@
         yAxis: { type: 'value' },
         series: [{
             type: 'bar', data: data.counts || [],
-            itemStyle: { color: function(p) { return parseFloat(data.bins[p.dataIndex]) >= 0 ? '#66bb6a' : '#ef5350'; } }
+            itemStyle: { color: function(p) { return parseFloat(data.bins[p.dataIndex]) >= 0.5 ? '#66bb6a' : '#ef5350'; } }
         }]
     };
     if (data.bins && data.bins.length) chart.setOption(option);

@@ -1,0 +1,17 @@
+[Unit]
+Description=QuantForge FastAPI application
+After=network.target postgresql.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/var/www/quantforge/backend
+ExecStart=/var/www/quantforge/backend/venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=5
+StandardOutput=append:/var/log/quantforge-api.log
+StandardError=append:/var/log/quantforge-api.log
+
+[Install]
+WantedBy=multi-user.target

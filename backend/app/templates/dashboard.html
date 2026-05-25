@@ -48,15 +48,15 @@
             <h2>📈 ML 预测 Top 10 股票</h2>
             {% if top_predictions %}
             <table>
-                <thead><tr><th>排名</th><th>代码</th><th>名称</th><th>预测收益率</th><th>置信度</th></tr></thead>
+                <thead><tr><th>排名</th><th>代码</th><th>名称</th><th>排名得分</th><th>置信度</th></tr></thead>
                 <tbody>
                 {% for p in top_predictions %}
                 <tr>
                     <td><span class="badge badge-purple">#{{ p.prediction_rank }}</span></td>
                     <td>{{ p.code }}</td>
                     <td>{{ p.name or '-' }}</td>
-                    <td style="color: {% if p.predicted_return and p.predicted_return > 0 %}var(--green){% else %}var(--red){% endif %}">
-                        {{ "%+.2f%%" % (p.predicted_return * 100) if p.predicted_return is not none else 'N/A' }}
+                    <td style="color: {% if p.predicted_return and p.predicted_return > 0.5 %}var(--green){% else %}var(--red){% endif %}">
+                        {{ "%.4f" % p.predicted_return if p.predicted_return is not none else 'N/A' }}
                     </td>
                     <td>{{ ("%.2f" % p.confidence) if p.confidence is not none else '-' }}</td>
                 </tr>
@@ -110,7 +110,7 @@
             itemStyle: {
                 color: function(p) {
                     var v = parseFloat(data.bins[p.dataIndex]);
-                    return v >= 0 ? '#66bb6a' : '#ef5350';
+                    return v >= 0.5 ? '#66bb6a' : '#ef5350';
                 }
             }
         }]

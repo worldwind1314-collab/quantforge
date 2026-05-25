@@ -1,0 +1,10 @@
+[Unit]
+Description=Run QuantForge pipeline daily at 18:00 (after market close)
+
+[Timer]
+OnCalendar=Mon..Fri 18:00:00
+Persistent=true
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

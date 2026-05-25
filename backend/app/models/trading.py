@@ -2,7 +2,7 @@
 
 from datetime import datetime
 
-from sqlalchemy import DateTime, Float, Integer, String, func
+from sqlalchemy import DateTime, Float, Integer, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from ..core.database import Base
@@ -72,8 +72,8 @@ class BacktestResult(Base):
     win_rate: Mapped[float] = mapped_column(Float)  # %
     total_trades: Mapped[int] = mapped_column(Integer)
     profit_factor: Mapped[float | None] = mapped_column(Float, nullable=True)
-    daily_values_json: Mapped[str | None] = mapped_column(String)  # JSON array of daily P&L
-    trade_log_json: Mapped[str | None] = mapped_column(String)  # JSON array of trade records
-    feature_importance_json: Mapped[str | None] = mapped_column(String)  # JSON dict of feature importance
+    daily_values_json: Mapped[str | None] = mapped_column(Text)  # JSON array of daily P&L
+    trade_log_json: Mapped[str | None] = mapped_column(Text)  # JSON array of trade records
+    feature_importance_json: Mapped[str | None] = mapped_column(Text)  # JSON dict of feature importance
     ic_mean: Mapped[float | None] = mapped_column(Float, nullable=True)  # Spearman IC mean
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())

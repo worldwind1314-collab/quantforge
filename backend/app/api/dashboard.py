@@ -7,6 +7,7 @@ from fastapi import APIRouter, Depends, Request
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func
 from sqlalchemy.orm import Session
+from time import time
 
 from pathlib import Path
 
@@ -20,9 +21,18 @@ router = APIRouter(tags=["dashboard"])
 _tmpl_dir = Path(__file__).parent.parent / "templates"
 templates = Jinja2Templates(directory=str(_tmpl_dir))
 
+# In-memory TTL cache for _get_stats()
+_stats_cache: dict | None = None
+_stats_cache_time: float = 0
+_STATS_CACHE_TTL = 60
+
 
 def _get_stats(db: Session) -> dict:
-    """Collect system-wide statistics."""
+    """Collect system-wide statistics. Cached with 60s TTL."""
+    global _stats_cache, _stats_cache_time
+    now = time()
+    if _stats_cache is not None and (now - _stats_cache_time) < _STATS_CACHE_TTL:
+        return _stats_cache
     stock_count = db.query(func.count(Stock.code)).scalar()
     quote_count = db.query(func.count(DailyQuote.id)).scalar()
     quote_codes = db.query(func.count(func.distinct(DailyQuote.code))).scalar()
@@ -62,7 +72,7 @@ def _get_stats(db: Session) -> dict:
             composite_mean = float(np.mean(comps))
             composite_std = float(np.std(comps))
 
-    return {
+    result = {
         "stock_count": stock_count,
         "quote_count": quote_count,
         "quote_codes": quote_codes,
@@ -79,6 +89,9 @@ def _get_stats(db: Session) -> dict:
         "composite_std": composite_std,
         "latest_codes": latest_codes,
     }
+    _stats_cache = result
+    _stats_cache_time = now
+    return result
 
 
 @router.get("/")
@@ -152,23 +165,32 @@ def dashboard_overview(request: Request, db: Session = Depends(get_db)):
         except (json.JSONDecodeError, TypeError):
             pass
 
-    # Coverage trend (last 30 days)
+    # Coverage trend (last 30 days) — 3 GROUP BY queries instead of 90 individual
+    start_30d = (date.today() - timedelta(days=30)).isoformat()
+    date_labels = [(date.today() - timedelta(days=i)).isoformat() for i in range(30, 0, -1)]
+
+    quote_counts = dict(
+        db.query(DailyQuote.trade_date, func.count(func.distinct(DailyQuote.code)))
+        .filter(DailyQuote.trade_date >= start_30d)
+        .group_by(DailyQuote.trade_date).all()
+    )
+    factor_counts = dict(
+        db.query(FactorScore.trade_date, func.count(FactorScore.id))
+        .filter(FactorScore.trade_date >= start_30d)
+        .group_by(FactorScore.trade_date).all()
+    )
+    pred_counts = dict(
+        db.query(MLPrediction.trade_date, func.count(MLPrediction.id))
+        .filter(MLPrediction.trade_date >= start_30d)
+        .group_by(MLPrediction.trade_date).all()
+    )
+
     coverage_trend = {"dates": [], "quotes": [], "factors": [], "predictions": []}
-    for i in range(30, 0, -1):
-        d = (date.today() - timedelta(days=i)).isoformat()
+    for d in date_labels:
         coverage_trend["dates"].append(d[-5:])
-        coverage_trend["quotes"].append(
-            db.query(func.count(func.distinct(DailyQuote.code)))
-            .filter(DailyQuote.trade_date == d).scalar() or 0
-        )
-        coverage_trend["factors"].append(
-            db.query(func.count(FactorScore.id))
-            .filter(FactorScore.trade_date == d).scalar() or 0
-        )
-        coverage_trend["predictions"].append(
-            db.query(func.count(MLPrediction.id))
-            .filter(MLPrediction.trade_date == d).scalar() or 0
-        )
+        coverage_trend["quotes"].append(quote_counts.get(d, 0))
+        coverage_trend["factors"].append(factor_counts.get(d, 0))
+        coverage_trend["predictions"].append(pred_counts.get(d, 0))
 
     return templates.TemplateResponse(request, "dashboard.html", {
         "page": "overview",
@@ -197,6 +219,7 @@ def predictions_page(request: Request, db: Session = Depends(get_db)):
             db.query(MLPrediction)
             .filter(MLPrediction.trade_date == latest_date)
             .order_by(MLPrediction.predicted_return.desc())
+            .limit(200)
             .all()
         )
         total = len(preds)
@@ -309,24 +332,31 @@ def factors_page(request: Request, db: Session = Depends(get_db)):
                 })
 
         # Factor distribution (sorted by percentile for line chart)
-        all_fs = (
-            db.query(FactorScore)
+        factor_cols = [
+            FactorScore.value_score, FactorScore.quality_score,
+            FactorScore.momentum_score, FactorScore.volatility_score,
+            FactorScore.composite_score,
+        ]
+        all_fs_raw = (
+            db.query(*factor_cols)
             .filter(FactorScore.trade_date == latest_date)
             .all()
         )
-        if all_fs:
-            for key in ["value_score", "quality_score", "momentum_score", "volatility_score", "composite_score"]:
-                vals = sorted([getattr(r, key) for r in all_fs if getattr(r, key) is not None])
+        # Sample if too many rows (2000 is enough for distribution + correlation)
+        import random
+        if len(all_fs_raw) > 2000:
+            all_fs_raw = random.sample(all_fs_raw, 2000)
+        if all_fs_raw:
+            # all_fs_raw is a list of tuples: (value, quality, momentum, volatility, composite)
+            for idx, key in enumerate(["value_score", "quality_score", "momentum_score", "volatility_score", "composite_score"]):
+                vals = sorted([r[idx] for r in all_fs_raw if r[idx] is not None])
                 if len(vals) > 50:
-                    idx = np.linspace(0, len(vals) - 1, 100, dtype=int)
-                    factor_dist[key.replace("_score", "")] = [vals[i] for i in idx]
+                    sample_idx = np.linspace(0, len(vals) - 1, 100, dtype=int)
+                    factor_dist[key.replace("_score", "")] = [vals[i] for i in sample_idx]
 
         # Correlation matrix
         factor_names = ["value", "quality", "momentum", "volatility", "composite"]
-        arr = np.array([
-            [getattr(r, f"{n}_score") or np.nan for n in factor_names]
-            for r in all_fs
-        ])
+        arr = np.array([list(r) for r in all_fs_raw], dtype=float)
         mask = ~np.isnan(arr).any(axis=1)
         if mask.sum() > 10:
             corr = np.corrcoef(arr[mask].T)
@@ -382,13 +412,20 @@ def data_status_page(request: Request, db: Session = Depends(get_db)):
             "pct": round(pct, 1),
         })
 
-    # Daily quote counts (last 30 days)
+    # Daily quote counts (last 30 days) — 1 GROUP BY instead of 30 individual
+    start_30d = (date.today() - timedelta(days=30)).isoformat()
+    date_labels = [(date.today() - timedelta(days=i)).isoformat() for i in range(30, 0, -1)]
+
+    daily_counts_raw = dict(
+        db.query(DailyQuote.trade_date, func.count(DailyQuote.id))
+        .filter(DailyQuote.trade_date >= start_30d)
+        .group_by(DailyQuote.trade_date).all()
+    )
+
     daily_counts = {"dates": [], "counts": []}
-    for i in range(30, 0, -1):
-        d = (date.today() - timedelta(days=i)).isoformat()
-        cnt = db.query(func.count(DailyQuote.id)).filter(DailyQuote.trade_date == d).scalar() or 0
+    for d in date_labels:
         daily_counts["dates"].append(d[-5:])
-        daily_counts["counts"].append(cnt)
+        daily_counts["counts"].append(daily_counts_raw.get(d, 0))
 
     return templates.TemplateResponse(request, "data_status.html", {
         "page": "data",

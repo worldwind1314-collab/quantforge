@@ -9,6 +9,11 @@ Rules:
   - T+1: cannot sell on same day as buy
   - No short selling (only long positions)
   - Round lot: multiples of 100 shares
+
+Risk controls (TopkDropoutStrategy-inspired):
+  - Suspension detection: skip stocks with zero volume/turnover
+  - Turnover filter: 0.1% < turnover < 25% (avoid illiquid & pump/dump)
+  - Volume filter: volume >= 30% of 20-day avg (ensure liquidity)
 """
 
 import json
@@ -164,6 +169,8 @@ class BacktestEngine:
         trades: list[Trade] = []
 
         for i, current_date in enumerate(trading_dates):
+            next_date = trading_dates[i + 1] if i + 1 < len(trading_dates) else current_date
+
             # Update position market values
             portfolio_value = cash
             for code, pos in positions.items():
@@ -184,7 +191,9 @@ class BacktestEngine:
 
             # Check stop loss / take profit
             for code in list(positions.keys()):
-                pos = positions[code]
+                pos = positions.get(code)
+                if pos is None:
+                    continue
                 close = pos.get("current_price", 0)
                 if close <= 0:
                     continue
@@ -194,10 +203,15 @@ class BacktestEngine:
                 if current_date <= pos["buy_date"]:
                     continue
 
+                # Execute exit at NEXT day's open (or close if last day)
+                exit_price = self._get_price(data, code, next_date, "open") if i + 1 < len(trading_dates) else close
+                if not exit_price or exit_price <= 0:
+                    exit_price = close
+
                 if pnl_pct <= strategy.config.stop_loss_pct:
-                    self._execute_sell(code, pos, close, current_date, cash, positions, trades, "stop_loss")
+                    cash = self._execute_sell(code, pos, exit_price, current_date, cash, positions, trades, "stop_loss")
                 elif pnl_pct >= strategy.config.take_profit_pct:
-                    self._execute_sell(code, pos, close, current_date, cash, positions, trades, "take_profit")
+                    cash = self._execute_sell(code, pos, exit_price, current_date, cash, positions, trades, "take_profit")
 
             # Generate signals
             try:
@@ -206,8 +220,25 @@ class BacktestEngine:
                 logger.debug(f"Signal error on {current_date}: {e}")
                 continue
 
-            # Execute signals
+            # Execute signals — use NEXT day open (avoid look-ahead bias)
             for sig in signals:
+                # Process SELL signals from strategy (e.g., dead cross, breakdown, overbought)
+                if sig.signal_type == SignalType.SELL:
+                    if sig.code not in positions:
+                        continue
+                    pos = positions[sig.code]
+                    # T+1: cannot sell on same day as buy
+                    if next_date <= pos["buy_date"]:
+                        continue
+                    price = self._get_price(data, sig.code, next_date, "open")
+                    if not price or price <= 0:
+                        continue
+                    cash = self._execute_sell(
+                        sig.code, pos, price, next_date, cash, positions, trades,
+                        sig.reason or "signal_sell",
+                    )
+                    continue
+
                 if sig.signal_type != SignalType.BUY:
                     continue
                 if sig.code in positions:
@@ -215,7 +246,11 @@ class BacktestEngine:
                 if len(positions) >= strategy.config.max_positions:
                     continue
 
-                price = self._get_price(data, sig.code, current_date, "close")
+                # Liquidity & suspension check (TopkDropoutStrategy-inspired)
+                if not self._is_tradable(data, sig.code, next_date):
+                    continue
+
+                price = self._get_price(data, sig.code, next_date, "open")
                 if not price or price <= 0:
                     continue
 
@@ -231,7 +266,7 @@ class BacktestEngine:
                 positions[sig.code] = {
                     "quantity": qty,
                     "avg_cost": price,
-                    "buy_date": current_date,
+                    "buy_date": next_date,
                     "current_price": price,
                     "market_value": price * qty,
                 }
@@ -241,7 +276,15 @@ class BacktestEngine:
         for code in list(positions.keys()):
             pos = positions[code]
             close = self._get_price(data, code, last_date, "close") or pos["avg_cost"]
-            self._execute_sell(code, pos, close, last_date, cash, positions, trades, "close")
+            cash = self._execute_sell(code, pos, close, last_date, cash, positions, trades, "close")
+
+        # Warn if zero trades (strategy never fired)
+        if len(trades) == 0:
+            logger.warning(
+                f"Backtest generated ZERO trades for {strategy.config.name} "
+                f"({start_date} ~ {end_date}, {len(codes)} stocks, {len(trading_dates)} trading days). "
+                f"Check: strategy parameters, data availability, or tradability filters."
+            )
 
         # Compute final portfolio value
         final_value = cash
@@ -308,6 +351,68 @@ class BacktestEngine:
         if pd.isna(val) or val <= 0:
             return None
         return float(val)
+
+    @staticmethod
+    def _is_tradable(
+        data: dict[str, pd.DataFrame], code: str, date: str,
+        min_turnover: float = 0.1,
+        max_turnover: float = 25.0,
+        min_vol_ratio: float = 0.3,
+    ) -> bool:
+        """Check whether a stock is tradable on a given date.
+
+        Returns False if the stock is:
+          - Suspended (price, volume, or turnover is 0/NaN)
+          - Too illiquid (turnover < min_turnover%)
+          - Potentially manipulated (turnover > max_turnover%)
+          - Volume abnormally low (< min_vol_ratio * 20-day average)
+        """
+        df = data.get(code)
+        if df is None or date not in df.index:
+            return False
+
+        idx = df.index.get_loc(date)
+
+        # Price must be positive
+        close_val = df["close"].iloc[idx] if "close" in df.columns else None
+        if close_val is None or pd.isna(close_val) or float(close_val) <= 0:
+            return False
+
+        # Turnover check: zero turnover = suspended
+        turnover_val = None
+        if "turnover" in df.columns:
+            tv = df["turnover"].iloc[idx]
+            if pd.isna(tv):
+                return False
+            turnover_val = float(tv)
+            # Zero turnover = suspended / halted
+            if turnover_val <= 0:
+                return False
+            # Too illiquid or too speculative
+            if turnover_val < min_turnover or turnover_val > max_turnover:
+                return False
+
+        # Volume check: zero volume = suspended
+        if "volume" in df.columns:
+            vol = df["volume"].iloc[idx]
+            if pd.isna(vol) or float(vol) <= 0:
+                return False
+
+            # Volume ratio vs 20-day average (ensure sufficient liquidity)
+            if idx >= 19 and turnover_val is not None:
+                vol_20d_avg = df["volume"].iloc[idx - 19:idx + 1].mean()
+                if not pd.isna(vol_20d_avg) and vol_20d_avg > 0:
+                    vol_ratio = float(vol) / float(vol_20d_avg)
+                    if vol_ratio < min_vol_ratio:
+                        return False
+
+        # Amount (成交额) must exist and be positive
+        if "amount" in df.columns:
+            amt = df["amount"].iloc[idx]
+            if pd.isna(amt) or float(amt) <= 0:
+                return False
+
+        return True
 
     @staticmethod
     def _compute_report(

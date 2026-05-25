@@ -10,10 +10,10 @@ class Settings(BaseSettings):
     DEBUG: bool = False
 
     # Database — same PG instance as BeyondFate, separate database
-    DATABASE_URL: str = "postgresql://beyondfate:bf_2026_sEcure!@localhost:5432/quantforge"
+    DATABASE_URL: str = "postgresql://user:password@localhost:5432/quantforge"
 
     # JWT
-    SECRET_KEY: str = "change-me-to-a-random-secret-in-production"
+    SECRET_KEY: str = ""  # MUST be set via .env in production
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 1440
 
@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     AI_MODEL: str = "deepseek-chat"
 
     # CORS
-    CORS_ORIGINS: list[str] = ["*"]
+    CORS_ORIGINS: list[str] = ["http://localhost:8000", "http://127.0.0.1:8000"]
 
     class Config:
         env_file = ".env"

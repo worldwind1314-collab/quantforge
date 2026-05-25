@@ -1,6 +1,6 @@
 """QuantForge ML training + prediction step. Called by run_pipeline.sh."""
+import json
 import logging
-import pickle
 import sys
 from datetime import date
 
@@ -14,7 +14,8 @@ from sqlalchemy import func
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 logger = logging.getLogger("ml_pipeline")
 
-MODEL_FILE = "/var/www/quantforge/backend/model.pkl"
+MODEL_FILE = "/var/www/quantforge/backend/model.txt"
+META_FILE = "/var/www/quantforge/backend/model_meta.json"
 
 db = SessionLocal()
 pipeline = MLPipeline(db)
@@ -37,17 +38,15 @@ logger.info("Train done: samples=%s, val_ic=%s, val_mse=%s, n_features=%s, best_
 logger.info("Top features: %s",
             dict(list(feature_importance.items())[:6]) if feature_importance else {})
 
-# ── Save model to disk ──
-with open(MODEL_FILE, "wb") as f:
-    pickle.dump(
-        {
-            "model": pipeline._model,
-            "feature_names": pipeline._feature_names or FEATURE_COLS,
-            "metrics": metrics,
-        },
-        f,
-    )
-logger.info("Model saved to %s", MODEL_FILE)
+# ── Save model using LightGBM native format ──
+pipeline._model.booster_.save_model(MODEL_FILE)
+with open(META_FILE, "w") as f:
+    json.dump({
+        "feature_names": pipeline._feature_names or FEATURE_COLS,
+        "metrics": {k: v for k, v in metrics.items() if k != "feature_importance"},
+        "feature_importance": feature_importance,
+    }, f, indent=2)
+logger.info("Model saved to %s (meta: %s)", MODEL_FILE, META_FILE)
 
 # ── Predict ──
 latest_date = db.query(func.max(DailyQuote.trade_date)).scalar()

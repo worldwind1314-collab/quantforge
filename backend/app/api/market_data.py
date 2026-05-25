@@ -1,9 +1,13 @@
 """Market data query endpoints."""
 
+from datetime import date
+
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from ..core.database import get_db
+from ..models.finance import MLPrediction
 from ..models.market import DailyQuote
 from ..models.stock import Stock
 
@@ -149,6 +153,9 @@ def trigger_sync(
 @router.get("/debug/akshare/{code}")
 def debug_akshare(code: str):
     """Debug: test AKShare stock_zh_a_hist for a single stock."""
+    from ..core.config import settings
+    if not settings.DEBUG:
+        return {"error": "Debug endpoints disabled in production"}
     import traceback
     try:
         import akshare as ak
@@ -181,6 +188,9 @@ def debug_akshare(code: str):
 @router.get("/debug/connectivity")
 def debug_connectivity():
     """Test connectivity to various financial data sources from the server."""
+    from ..core.config import settings
+    if not settings.DEBUG:
+        return {"error": "Debug endpoints disabled in production"}
     import traceback
     import requests
 
@@ -306,4 +316,80 @@ def debug_connectivity():
         "connectivity": results,
         "akshare_alternatives": ak_results,
         "financial_indicators": fin_results,
+    }
+
+
+@router.get("/pipeline/status")
+def pipeline_status(db: Session = Depends(get_db)):
+    """Check when the data pipeline last ran successfully."""
+    latest_quote = db.query(func.max(DailyQuote.trade_date)).scalar()
+    latest_pred = db.query(func.max(MLPrediction.trade_date)).scalar()
+    today = date.today().isoformat()
+
+    stale_days = 999
+    if latest_quote:
+        try:
+            d = date.fromisoformat(latest_quote)
+            stale_days = (date.today() - d).days
+        except (ValueError, TypeError):
+            pass
+
+    return {
+        "latest_quote_date": latest_quote,
+        "latest_prediction_date": latest_pred,
+        "stale_days": stale_days,
+        "healthy": stale_days <= 3,
+        "note": "Pipeline runs weekdays at 18:00 via systemd timer",
+    }
+
+
+@router.get("/health/freshness")
+def data_freshness():
+    """全面的数据新鲜度检查，包含所有数据类型。
+
+    用于实盘前的数据就绪验证。返回每种数据的最新日期、延迟天数、健康状态。
+    """
+    from ..services.data_freshness import DataFreshnessMonitor
+
+    monitor = DataFreshnessMonitor()
+    return monitor.get_health_report()
+
+
+@router.get("/health/pre-trade")
+def pre_trade_check():
+    """实盘前检查 — 返回是否可以安全交易的决策。
+
+    应在每个交易日 9:00-9:25 调用。
+    返回 go/no-go 决策及详细的阻断原因和警告。
+    """
+    from ..services.data_freshness import DataFreshnessMonitor
+
+    monitor = DataFreshnessMonitor()
+    return monitor.pre_trade_check()
+
+
+@router.get("/health/latency")
+def latency_report():
+    """数据延迟分析报告 — 各数据类型的预期就绪时间和实际延迟。
+
+    用于诊断哪些数据源存在滞后问题。
+    """
+    from ..services.data_freshness import DataFreshnessMonitor
+
+    monitor = DataFreshnessMonitor()
+    report = monitor.get_latency_report()
+    return {"report": report}
+
+
+@router.get("/health/sources")
+def available_sources():
+    """列出当前可用的所有数据源及其状态。"""
+    from ..services.multi_source import get_orchestrator
+
+    orch = get_orchestrator()
+    return {
+        "available_sources": orch.available_sources,
+        "baostock_available": orch.has_source("baostock"),
+        "joinquant_available": orch.has_source("joinquant"),
+        "akshare_available": True,  # always available
     }

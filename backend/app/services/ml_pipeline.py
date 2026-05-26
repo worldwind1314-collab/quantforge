@@ -300,7 +300,7 @@ class MLPipeline:
 
     # ── Model training ─────────────────────────────────────────────
 
-    def train(self, start_date: str = "2024-01-01", end_date: str = "2026-05-01", max_stocks: int = 500) -> dict:
+    def train(self, start_date: str = "2024-01-01", end_date: str = "2026-05-01", max_stocks: int = 800) -> dict:
         """Train LightGBM model with multi-horizon target and industry features.
 
         Uses lower learning rate + more trees for stable convergence,
@@ -317,19 +317,19 @@ class MLPipeline:
 
         logger.info(f"Train: {len(X_train)} samples, Val: {len(X_val)} samples")
 
-        n_est = min(800, max(200, len(X_train) // 5))
-        num_leaves = min(63, max(15, len(X_train) // 200))
+        n_est = min(1000, max(300, len(X_train) // 4))
+        num_leaves = min(31, max(15, len(X_train) // 300))
 
         self._model = lgb.LGBMRegressor(
             n_estimators=n_est,
             num_leaves=num_leaves,
-            learning_rate=0.02,
-            subsample=0.7,
+            learning_rate=0.01,
+            subsample=0.6,
             subsample_freq=1,
-            colsample_bytree=0.65,
-            reg_alpha=0.15,
-            reg_lambda=1.0,
-            min_child_samples=30,
+            colsample_bytree=0.55,
+            reg_alpha=0.3,
+            reg_lambda=2.0,
+            min_child_samples=50,
             random_state=42,
             n_jobs=-1,
             verbose=-1,
@@ -338,7 +338,7 @@ class MLPipeline:
             X_train, y_train,
             eval_set=[(X_val, y_val)],
             eval_metric="rmse",
-            callbacks=[lgb.early_stopping(80, verbose=False), lgb.log_evaluation(50)],
+            callbacks=[lgb.early_stopping(120, verbose=False), lgb.log_evaluation(50)],
         )
 
         # Compute per-sample prediction variance for confidence calibration

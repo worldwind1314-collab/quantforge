@@ -192,14 +192,13 @@ logger.info(f'=== Backtest through {latest_date} ===')
 universe = get_universe(db, name='liquid_100')
 logger.info(f'Backtest universe: {len(universe)} stocks')
 
-config = StrategyConfig(name='daily', initial_capital=100000, max_position_pct=0.2, max_positions=5)
 engine = BacktestEngine(db)
 
-# ── Daily: run all 3 strategies with default params ──
+# Daily: run all 3 strategies with default params
 daily_strategies = {
-    'ma_crossover': MACrossoverStrategy(fast=10, slow=30, config=config),
-    'momentum_breakout': MomentumBreakoutStrategy(lookback=20, config=config),
-    'mean_reversion': MeanReversionStrategy(bb_window=20, config=config),
+    'ma_crossover': MACrossoverStrategy(fast=10, slow=30),
+    'momentum_breakout': MomentumBreakoutStrategy(lookback=20),
+    'mean_reversion': MeanReversionStrategy(bb_window=20),
 }
 
 for name, strat in daily_strategies.items():
@@ -216,15 +215,15 @@ if is_friday:
     logger.info('=== Friday: Running full grid search ===')
     grid_configs = {
         'ma_crossover': [
-            {'strategy': MACrossoverStrategy(fast=f, slow=s, config=config), 'params': f'fast={f},slow={s}'}
+            {'strategy': MACrossoverStrategy(fast=f, slow=s), 'params': f'fast={f},slow={s}'}
             for f in [5, 10, 20] for s in [20, 30, 60] if f < s
         ],
         'momentum_breakout': [
-            {'strategy': MomentumBreakoutStrategy(lookback=lb, config=config), 'params': f'lookback={lb}'}
+            {'strategy': MomentumBreakoutStrategy(lookback=lb), 'params': f'lookback={lb}'}
             for lb in [10, 20, 30, 60]
         ],
         'mean_reversion': [
-            {'strategy': MeanReversionStrategy(bb_window=w, config=config), 'params': f'bb_window={w}'}
+            {'strategy': MeanReversionStrategy(bb_window=w), 'params': f'bb_window={w}'}
             for w in [10, 20, 30]
         ],
     }

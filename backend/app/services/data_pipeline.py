@@ -151,6 +151,14 @@ class DataPipeline:
                     continue
 
             if df is not None and not df.empty:
+                # Compute pct_change if missing (AKShare may not include it)
+                if "pct_change" not in df.columns or df["pct_change"].isna().all():
+                    df = df.sort_values("date") if "date" in df.columns else df
+                    if "close" in df.columns:
+                        df["pct_change"] = df["close"].pct_change() * 100
+                if "change" not in df.columns or df["change"].isna().all():
+                    if "close" in df.columns:
+                        df["change"] = df["close"].diff()
                 results[code] = df
             if (i + 1) % 50 == 0:
                 logger.info(f"Fetched {i + 1}/{len(codes)} stocks")
@@ -777,7 +785,11 @@ class DataPipeline:
 
     @staticmethod
     def sync_industry_data(db: Session | None = None) -> int:
-        """Fetch industry classification from East Money and populate Stock.industry field."""
+        """Fetch industry classification from East Money and populate Stock.industry field.
+
+        Uses stock_individual_info_em() for stocks without industry data, with rate limiting.
+        Falls back to board-based batch sync.
+        """
         if db is None:
             db = SessionLocal()
             close_db = True
@@ -785,37 +797,81 @@ class DataPipeline:
             close_db = False
 
         try:
-            df = ak.stock_board_industry_name_em()
             count = 0
-            for _, row in df.iterrows():
-                board_name = row.get("板块名称", "")
-                if not board_name:
-                    continue
 
+            # Try board-based industry sync first (fast, batch)
+            try:
+                df = ak.stock_board_industry_name_em()
+                for _, row in df.iterrows():
+                    board_name = row.get("板块名称", "")
+                    if not board_name:
+                        continue
+                    try:
+                        members = ak.stock_board_industry_cons_em(symbol=board_name)
+                        if members is not None and not members.empty:
+                            code_col = members.columns[0] if members.columns[0] in ["代码", "code"] else None
+                            if code_col is None:
+                                for c in members.columns:
+                                    if "代码" in c or "code" in c.lower():
+                                        code_col = c
+                                        break
+                            codes_list = members[code_col].astype(str).str.strip().tolist() if code_col else []
+                            for code in codes_list:
+                                existing = db.get(Stock, code)
+                                if existing and not existing.industry:
+                                    existing.industry = board_name
+                                    count += 1
+                    except Exception:
+                        continue
+
+                    if count > 0 and count % 500 == 0:
+                        db.commit()
+                        logger.info(f"Industry sync: {count} stocks classified")
+            except Exception as e:
+                logger.warning(f"Board-based industry sync failed: {e}, trying individual sync...")
+
+            # Fill remaining gaps with individual info (includes area + list_date too)
+            if count < 4000:
                 try:
-                    members = ak.stock_board_industry_cons_em(symbol=board_name)
-                    if members is not None and not members.empty:
-                        code_col = members.columns[0] if members.columns[0] in ["代码", "code"] else None
-                        if code_col is None:
-                            for c in members.columns:
-                                if "代码" in c or "code" in c.lower():
-                                    code_col = c
-                                    break
-                        codes_list = members[code_col].astype(str).str.strip().tolist() if code_col else []
-                        for code in codes_list:
-                            existing = db.get(Stock, code)
-                            if existing and not existing.industry:
-                                existing.industry = board_name
-                                count += 1
-                except Exception:
-                    continue
-
-                if count > 0 and count % 500 == 0:
+                    gap_codes = [
+                        r[0] for r in db.query(Stock.code)
+                        .filter(Stock.industry.is_(None))
+                        .limit(6000)
+                        .all()
+                    ]
+                    logger.info(f"Filling industry/area gaps for {len(gap_codes)} stocks")
+                    import time as _time
+                    idx = 0
+                    for code in gap_codes:
+                        try:
+                            info = ak.stock_individual_info_em(symbol=code)
+                            stock = db.get(Stock, code)
+                            if stock is None:
+                                continue
+                            # Parse simple key-value table
+                            if isinstance(info, pd.DataFrame) and not info.empty:
+                                info_map = dict(zip(info.iloc[:, 0].astype(str), info.iloc[:, 1].astype(str)))
+                                industry_val = info_map.get("行业", info_map.get("industry", ""))
+                                area_val = info_map.get("地区", info_map.get("province", info_map.get("area", "")))
+                                list_date_val = info_map.get("上市时间", info_map.get("list_date", info_map.get("上市日期", "")))
+                                if industry_val and not stock.industry:
+                                    stock.industry = industry_val
+                                    count += 1
+                                if area_val and not stock.area:
+                                    stock.area = area_val
+                                if list_date_val and not stock.list_date:
+                                    stock.list_date = str(list_date_val).strip()[:10]
+                            idx += 1
+                            if idx % 100 == 0:
+                                db.commit()
+                                _time.sleep(0.3)  # rate limit
+                        except Exception:
+                            continue
                     db.commit()
-                    logger.info(f"Industry sync: {count} stocks classified")
+                except Exception as e:
+                    logger.warning(f"Individual info sync failed: {e}")
 
-            db.commit()
-            logger.info(f"Updated industry for {count} stocks")
+            logger.info(f"Updated industry/area for {count} stocks")
             return count
         finally:
             if close_db:

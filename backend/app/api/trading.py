@@ -576,6 +576,8 @@ def run_ml_backtest(
 
         def generate_signals(self, data, current_date):
             preds = self._preds_by_date.get(current_date, [])
+            if not preds:
+                return []
             ranked = sorted(preds, key=lambda x: x.get("predicted_return", -999), reverse=True)
             buy_codes = {r["code"] for r in ranked[: self._top_n]}
             signals = []
@@ -583,9 +585,14 @@ def run_ml_backtest(
                 code = r["code"]
                 if code not in data:
                     continue
+                rank = r.get("prediction_rank", 999)
                 if code in buy_codes:
                     signals.append(Signal(code=code, date=current_date, signal_type=SignalType.BUY, weight=r.get("confidence", 0.5),
-                        reason=f"ML rank #{r['prediction_rank']}, pred={r['predicted_return']:.2f}%"))
+                        reason=f"ML rank #{rank}, pred={r['predicted_return']:.2f}%"))
+                elif rank > self._top_n * 2:
+                    # Rotate out: sell if rank drops significantly below top-N
+                    signals.append(Signal(code=code, date=current_date, signal_type=SignalType.SELL, weight=0,
+                        reason=f"ML rank #{rank} fell below sell threshold"))
             return signals
 
     strategy = CachedMLStrategy(predictions_by_date, top_n, config)

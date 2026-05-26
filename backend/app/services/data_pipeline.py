@@ -1,6 +1,8 @@
 """AKShare data pipeline — pull A-share market data into PostgreSQL."""
 
 import logging
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, timedelta
 
 import akshare as ak
@@ -326,30 +328,46 @@ class DataPipeline:
             return None
 
     @staticmethod
+    def _fetch_with_retry(fn, code: str, max_retries: int = 3):
+        """Call fn(code) with exponential backoff on failure."""
+        for attempt in range(max_retries):
+            try:
+                result = fn(code)
+                if result is not None:
+                    return result
+                # result is None = API returned empty, retry with backoff
+                if attempt < max_retries - 1:
+                    time.sleep(0.5 * (2 ** attempt))
+            except Exception:
+                if attempt < max_retries - 1:
+                    time.sleep(1.0 * (2 ** attempt))
+        return None
+
+    @staticmethod
     def fetch_financial_indicators(code: str) -> dict | None:
         """Fetch financial indicators with fallback: East Money -> Sina -> None.
 
         Returns a dict ready for FinancialIndicator creation, or None.
         """
         # Try East Money first (more reliable, structured data)
-        result = DataPipeline.fetch_financial_indicators_em(code)
+        result = DataPipeline._fetch_with_retry(DataPipeline.fetch_financial_indicators_em, code)
         if result is not None:
             return result
 
         # Fallback to Sina stock_financial_abstract
-        try:
-            df = ak.stock_financial_abstract(symbol=code)
+        def _fetch_sina(c):
+            df = ak.stock_financial_abstract(symbol=c)
             if df is None or df.empty:
                 return None
 
             # Period columns are date strings like "20260331"
-            date_cols = [c for c in df.columns if c not in ["选项", "指标"] and str(c).isdigit()]
+            date_cols = [c_ for c_ in df.columns if c_ not in ["选项", "指标"] and str(c_).isdigit()]
             if not date_cols:
                 return None
             latest_period = date_cols[0]  # First column = most recent
 
-            result = {
-                "code": code,
+            return {
+                "code": c,
                 "report_date": latest_period,
                 "roe": DataPipeline._extract_indicator_fuzzy(df, DataPipeline._FINANCIAL_INDICATOR_MAP["roe"], latest_period),
                 "eps": DataPipeline._extract_indicator_fuzzy(df, DataPipeline._FINANCIAL_INDICATOR_MAP["eps"], latest_period),
@@ -365,79 +383,117 @@ class DataPipeline:
                 "bv_per_share": DataPipeline._extract_indicator_fuzzy(df, DataPipeline._FINANCIAL_INDICATOR_MAP["bv_per_share"], latest_period),
                 "revenue_per_share": DataPipeline._extract_indicator_fuzzy(df, DataPipeline._FINANCIAL_INDICATOR_MAP["revenue_per_share"], latest_period),
             }
-            return result
-        except Exception as e:
-            logger.warning(f"Failed to fetch financial indicators for {code}: {e}")
+
+        try:
+            return DataPipeline._fetch_with_retry(_fetch_sina, code)
+        except Exception:
             return None
 
     @staticmethod
     def sync_financial_indicators(codes: list[str] | None = None, db: Session | None = None) -> int:
-        """Sync latest financial indicators for given stocks using stock_financial_abstract."""
+        """Sync latest financial indicators with skip-if-recent + concurrent fetch.
+
+        - Skips stocks synced within the last 90 days (quarterly data doesn't change faster)
+        - Fetches financial data in parallel (ThreadPoolExecutor, 8 workers)
+        - Retries failed API calls up to 3 times with exponential backoff
+        """
+        close_db = False
         if db is None:
             db = SessionLocal()
             close_db = True
-        else:
-            close_db = False
 
         if codes is None:
             codes = [r[0] for r in db.query(Stock.code).filter(Stock.is_active == True).all()]
 
+        # ── Skip recently synced stocks ──
+        cutoff = (date.today() - timedelta(days=90)).strftime("%Y%m%d")
+        recent_codes = set(
+            r[0] for r in db.query(FinancialIndicator.code)
+            .filter(
+                FinancialIndicator.code.in_(codes),
+                FinancialIndicator.report_date >= cutoff,
+                FinancialIndicator.updated_at >= func.current_date() - text("INTERVAL '90 days'"),
+            )
+            .distinct()
+            .all()
+        )
+        to_fetch = [c for c in codes if c not in recent_codes]
+        logger.info(f"Financial sync: {len(to_fetch)}/{len(codes)} stocks need fetch "
+                     f"({len(recent_codes)} recently synced, skipped)")
+
+        if not to_fetch:
+            if close_db:
+                db.close()
+            return 0
+
+        # ── Fetch in parallel ──
+        MAX_WORKERS = 8
+        count = 0
+        batch_results: list[dict | None] = []
+
         try:
-            count = 0
-            for i, code in enumerate(codes):
-                data = DataPipeline.fetch_financial_indicators(code)
-                if data is None:
-                    continue
+            with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
+                futures = {
+                    executor.submit(DataPipeline.fetch_financial_indicators, code): code
+                    for code in to_fetch
+                }
+                for future in as_completed(futures):
+                    code = futures[future]
+                    try:
+                        data = future.result()
+                        batch_results.append(data)
+                    except Exception:
+                        batch_results.append(None)
 
-                report_date = data["report_date"]
+                    if len(batch_results) % 200 == 0:
+                        logger.info(f"Financial fetch: {len(batch_results)}/{len(to_fetch)}")
 
-                # Upsert
-                existing = (
-                    db.query(FinancialIndicator)
-                    .filter(FinancialIndicator.code == code, FinancialIndicator.report_date == report_date)
-                    .first()
-                )
-                if existing:
-                    existing.roe = data.get("roe")
-                    existing.eps = data.get("eps")
-                    existing.gross_margin = data.get("gross_margin")
-                    existing.net_margin = data.get("net_margin")
-                    existing.revenue_growth = data.get("revenue_growth")
-                    existing.profit_growth = data.get("profit_growth")
-                    existing.asset_growth = data.get("asset_growth")
-                    existing.debt_ratio = data.get("debt_ratio")
-                    existing.current_ratio = data.get("current_ratio")
-                    existing.asset_turnover = data.get("asset_turnover")
-                    existing.cf_per_share = data.get("cf_per_share")
-                    existing.bv_per_share = data.get("bv_per_share")
-                    existing.revenue_per_share = data.get("revenue_per_share")
-                    existing.pe = data.get("pe")
-                    existing.pb = data.get("pb")
-                    existing.ps = data.get("ps")
-                else:
-                    db.add(FinancialIndicator(
-                        code=code, report_date=report_date,
-                        roe=data.get("roe"), eps=data.get("eps"),
-                        gross_margin=data.get("gross_margin"), net_margin=data.get("net_margin"),
-                        revenue_growth=data.get("revenue_growth"), profit_growth=data.get("profit_growth"),
-                        asset_growth=data.get("asset_growth"), debt_ratio=data.get("debt_ratio"),
-                        current_ratio=data.get("current_ratio"), asset_turnover=data.get("asset_turnover"),
-                        cf_per_share=data.get("cf_per_share"),
-                        bv_per_share=data.get("bv_per_share"), revenue_per_share=data.get("revenue_per_share"),
-                        pe=data.get("pe"), pb=data.get("pb"), ps=data.get("ps"),
-                    ))
+            # ── Save results with a fresh session ──
+            save_db = SessionLocal()
+            try:
+                for data in batch_results:
+                    if data is None:
+                        continue
 
-                count += 1
-                if (i + 1) % 100 == 0:
-                    db.commit()
-                    logger.info(f"Financial sync: {i + 1}/{len(codes)}")
+                    code = data["code"]
+                    report_date = data["report_date"]
 
-            db.commit()
-            logger.info(f"Synced financial indicators for {count} stocks")
-            return count
+                    existing = (
+                        save_db.query(FinancialIndicator)
+                        .filter(FinancialIndicator.code == code, FinancialIndicator.report_date == report_date)
+                        .first()
+                    )
+                    if existing:
+                        for field in ["roe", "eps", "gross_margin", "net_margin", "revenue_growth",
+                                       "profit_growth", "asset_growth", "debt_ratio", "current_ratio",
+                                       "asset_turnover", "cf_per_share", "bv_per_share", "revenue_per_share",
+                                       "pe", "pb", "ps"]:
+                            val = data.get(field)
+                            if val is not None:
+                                setattr(existing, field, val)
+                    else:
+                        save_db.add(FinancialIndicator(
+                            code=code, report_date=report_date,
+                            roe=data.get("roe"), eps=data.get("eps"),
+                            gross_margin=data.get("gross_margin"), net_margin=data.get("net_margin"),
+                            revenue_growth=data.get("revenue_growth"), profit_growth=data.get("profit_growth"),
+                            asset_growth=data.get("asset_growth"), debt_ratio=data.get("debt_ratio"),
+                            current_ratio=data.get("current_ratio"), asset_turnover=data.get("asset_turnover"),
+                            cf_per_share=data.get("cf_per_share"),
+                            bv_per_share=data.get("bv_per_share"), revenue_per_share=data.get("revenue_per_share"),
+                            pe=data.get("pe"), pb=data.get("pb"), ps=data.get("ps"),
+                        ))
+                    count += 1
+
+                save_db.commit()
+                logger.info(f"Synced financial indicators for {count} stocks")
+            finally:
+                save_db.close()
         finally:
             if close_db:
                 db.close()
+
+        return count
 
     # ── Full sync ──────────────────────────────────────────────────
 

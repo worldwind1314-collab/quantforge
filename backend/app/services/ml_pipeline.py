@@ -68,17 +68,32 @@ class MLPipeline:
 
     # ── Data preparation ───────────────────────────────────────────
 
+    @staticmethod
+    def _load_industry_map(db: Session, codes: list[str]) -> dict[str, str]:
+        """Load industry classification for a set of stock codes."""
+        rows = db.query(Stock.code, Stock.industry).filter(Stock.code.in_(codes)).all()
+        return {r.code: (r.industry or "未知") for r in rows}
+
+    @staticmethod
+    def _get_top_industries(industry_map: dict[str, str], top_n: int = 15) -> list[str]:
+        """Return the top-N most common industries."""
+        from collections import Counter
+        counts = Counter(industry_map.values())
+        return [ind for ind, _ in counts.most_common(top_n)]
+
     def prepare_training_data(
         self, start_date: str, end_date: str
-    ) -> tuple[np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, list[str]]:
         """Build training dataset from granular factors for ALL stocks with price data.
 
-        Target: cross-sectional rank percentile of forward 20-day return.
+        Target: average of cross-sectional rank percentiles of forward 5d, 10d, 20d returns.
+        Multi-horizon average reduces single-period noise and produces more stable rankings.
 
         Optimizations:
         - One bulk DB query for all price data (not per-stock)
         - Forward returns computed in-memory from pre-loaded prices
         - Bi-weekly snapshots to balance sample count vs computation
+        - Industry one-hot encoding for top sectors
         """
         db = self._get_db()
 
@@ -175,38 +190,50 @@ class MLPipeline:
                 if factors_df.empty:
                     continue
 
-                # Compute forward returns from pre-loaded prices
-                forward_rets = {}
+                # Multi-horizon forward returns (5d, 10d, 20d) for noise-reduced target
+                forward_rets_5d = {}
+                forward_rets_10d = {}
+                forward_rets_20d = {}
                 for code in factors_df.index:
                     df = price_data.get(code)
                     if df is None:
                         continue
-                    ret = self._forward_return_from_prices(df, snap_date, horizon=20)
-                    if ret is not None:
-                        forward_rets[code] = ret
+                    r5 = self._forward_return_from_prices(df, snap_date, horizon=5)
+                    r10 = self._forward_return_from_prices(df, snap_date, horizon=10)
+                    r20 = self._forward_return_from_prices(df, snap_date, horizon=20)
+                    if r5 is not None:
+                        forward_rets_5d[code] = r5
+                    if r10 is not None:
+                        forward_rets_10d[code] = r10
+                    if r20 is not None:
+                        forward_rets_20d[code] = r20
 
-                if len(forward_rets) < 50:
+                # Use intersection of codes that have all 3 horizons
+                valid_codes = set(forward_rets_5d) & set(forward_rets_10d) & set(forward_rets_20d)
+                if len(valid_codes) < 50:
                     continue
 
-                # Cross-sectional rank percentile
-                ret_series = pd.Series(forward_rets)
-                ranks = ret_series.rank(pct=True)
+                # Multi-horizon target: average of 5d, 10d, 20d cross-sectional rank percentiles
+                rank_5d = pd.Series({c: forward_rets_5d[c] for c in valid_codes}).rank(pct=True)
+                rank_10d = pd.Series({c: forward_rets_10d[c] for c in valid_codes}).rank(pct=True)
+                rank_20d = pd.Series({c: forward_rets_20d[c] for c in valid_codes}).rank(pct=True)
+                avg_rank = (rank_5d + rank_10d + rank_20d) / 3.0
 
                 for code in factors_df.index:
-                    if code not in forward_rets:
+                    if code not in valid_codes:
                         continue
                     feats = {}
                     for col in FEATURE_COLS:
                         val = factors_df.loc[code, col] if col in factors_df.columns else None
                         feats[col] = val if not (isinstance(val, float) and np.isnan(val)) else None
-                    feats["target"] = ranks[code]
+                    feats["target"] = avg_rank[code]
                     feats["code"] = code
                     feats["trade_date"] = snap_date
                     all_samples.append(feats)
 
                 if (i + 1) % 5 == 0:
                     logger.info(f"  Snapshot {i+1}/{len(snapshot_dates)}: {snap_date}, "
-                                f"{len(forward_rets)} stocks, {len(all_samples)} total samples")
+                                f"{len(valid_codes)} stocks, {len(all_samples)} total samples")
 
             except Exception as e:
                 logger.warning(f"Snapshot {snap_date} failed: {e}")
@@ -216,23 +243,49 @@ class MLPipeline:
             raise ValueError(f"Not enough training samples: {len(all_samples)}")
 
         df = pd.DataFrame(all_samples)
-        X = df[FEATURE_COLS].values.astype(np.float32)
+
+        # ── Industry one-hot encoding ──
+        all_codes = df["code"].unique().tolist()
+        industry_map = self._load_industry_map(db, all_codes)
+        top_industries = self._get_top_industries(industry_map)
+        logger.info(f"Top industries: {top_industries}")
+
+        industry_dummies = pd.DataFrame(0, index=df.index, columns=[f"ind_{ind}" for ind in top_industries])
+        for idx, code in zip(df.index, df["code"]):
+            ind = industry_map.get(code, "未知")
+            col_name = f"ind_{ind}"
+            if col_name in industry_dummies.columns:
+                industry_dummies.loc[idx, col_name] = 1
+
+        self._industry_cols = list(industry_dummies.columns)
+        self._top_industries = top_industries
+
+        base_cols = [c for c in FEATURE_COLS if c in df.columns]
+        X_base = df[base_cols].values.astype(np.float32)
+        X_ind = industry_dummies.values.astype(np.float32)
+        X = np.concatenate([X_base, X_ind], axis=1)
         y = df["target"].values.astype(np.float32)
 
-        logger.info(f"Training data: {len(X)} samples, {len(FEATURE_COLS)} features")
+        all_feature_names = base_cols + list(industry_dummies.columns)
+        logger.info(f"Training data: {len(X)} samples, {len(all_feature_names)} features "
+                     f"({len(base_cols)} factors + {len(industry_dummies.columns)} industries)")
         logger.info(f"Target stats: mean={y.mean():.3f}, std={y.std():.3f}, "
                     f"min={y.min():.3f}, max={y.max():.3f}")
 
-        self._feature_names = FEATURE_COLS
-        return X, y
+        self._feature_names = all_feature_names
+        return X, y, all_feature_names
 
     # ── Model training ─────────────────────────────────────────────
 
     def train(self, start_date: str = "2024-01-01", end_date: str = "2026-05-01") -> dict:
-        """Train LightGBM model. Returns training metrics."""
+        """Train LightGBM model with multi-horizon target and industry features.
+
+        Uses lower learning rate + more trees for stable convergence,
+        stronger L2 regularization to prevent overfitting on noisy financial data.
+        """
         import lightgbm as lgb
 
-        X, y = self.prepare_training_data(start_date, end_date)
+        X, y, feature_names = self.prepare_training_data(start_date, end_date)
 
         # Time-series split: last 20% for validation
         split = int(len(X) * 0.8)
@@ -241,20 +294,19 @@ class MLPipeline:
 
         logger.info(f"Train: {len(X_train)} samples, Val: {len(X_val)} samples")
 
-        # LightGBM with ranking-aware parameters
-        n_est = min(500, max(100, len(X_train) // 5))
+        n_est = min(800, max(200, len(X_train) // 5))
         num_leaves = min(63, max(15, len(X_train) // 200))
 
         self._model = lgb.LGBMRegressor(
             n_estimators=n_est,
             num_leaves=num_leaves,
-            learning_rate=0.03,
+            learning_rate=0.02,
             subsample=0.7,
             subsample_freq=1,
-            colsample_bytree=0.7,
-            reg_alpha=0.1,
-            reg_lambda=0.5,
-            min_child_samples=20,
+            colsample_bytree=0.65,
+            reg_alpha=0.15,
+            reg_lambda=1.0,
+            min_child_samples=30,
             random_state=42,
             n_jobs=-1,
             verbose=-1,
@@ -263,7 +315,7 @@ class MLPipeline:
             X_train, y_train,
             eval_set=[(X_val, y_val)],
             eval_metric="rmse",
-            callbacks=[lgb.early_stopping(50, verbose=False), lgb.log_evaluation(20)],
+            callbacks=[lgb.early_stopping(80, verbose=False), lgb.log_evaluation(50)],
         )
 
         # Compute per-sample prediction variance for confidence calibration
@@ -286,15 +338,11 @@ class MLPipeline:
         # Feature importance
         importance = dict(
             zip(
-                FEATURE_COLS,
+                feature_names,
                 self._model.feature_importances_.tolist(),
             )
         )
-        # Sort by importance
-        importance = dict(sorted(importance.items(), key=lambda x: x[1], reverse=True))
-
-        # Compute IC by date (within each cross-section)
-        # We don't have dates in the split arrays, so skip for now
+        importance = dict(sorted(importance.items(), key=lambda x: x[1], reverse=True)[:20])
 
         metrics = {
             "train_samples": len(X_train),
@@ -304,7 +352,7 @@ class MLPipeline:
             "val_mse": round(val_mse, 4),
             "val_mae": round(val_mae, 4),
             "feature_importance": importance,
-            "n_features": len(FEATURE_COLS),
+            "n_features": len(feature_names),
             "best_iteration": self._model.best_iteration_,
         }
 
@@ -382,7 +430,6 @@ class MLPipeline:
             .distinct().all()
         )
         if not codes:
-            # Fallback: get all active stocks
             codes = sorted(
                 r[0] for r in db.query(Stock.code).filter(Stock.is_active == True).all()
             )
@@ -390,19 +437,37 @@ class MLPipeline:
         logger.info(f"Computing factors for {len(codes)} stocks on {trade_date}")
         factors_df = engine.compute_granular_factors(trade_date, codes=codes)
 
-        # Build feature matrix
-        X = np.zeros((len(factors_df), len(FEATURE_COLS)), dtype=np.float32)
+        # Feature names from training (base factors only, exclude industry dummies)
+        industry_cols = getattr(self, '_industry_cols', [])
+        base_feature_names = [c for c in self._feature_names if c in FEATURE_COLS]
+
+        # Build base feature matrix
+        X_base = np.zeros((len(factors_df), len(base_feature_names)), dtype=np.float32)
         valid_codes = []
         for i, code in enumerate(factors_df.index):
             feats = []
-            for col in FEATURE_COLS:
+            for col in base_feature_names:
                 val = factors_df.loc[code, col] if col in factors_df.columns else np.nan
                 feats.append(val if not (isinstance(val, float) and np.isnan(val)) else np.nan)
-            X[i] = feats
+            X_base[i] = feats
             valid_codes.append(code)
 
-        # Fill NaN with 0 for prediction
-        X = np.nan_to_num(X, nan=0.0)
+        X_base = np.nan_to_num(X_base, nan=0.0)
+
+        # Industry one-hot features
+        if industry_cols:
+            industry_map = self._load_industry_map(db, valid_codes)
+            X_ind = np.zeros((len(valid_codes), len(industry_cols)), dtype=np.float32)
+            for i, code in enumerate(valid_codes):
+                ind = industry_map.get(code, "未知")
+                col_name = f"ind_{ind}"
+                if col_name in industry_cols:
+                    j = industry_cols.index(col_name)
+                    X_ind[i, j] = 1.0
+            X = np.concatenate([X_base, X_ind], axis=1)
+        else:
+            X = X_base
+
         preds = self._model.predict(X)
         confidences = self._compute_confidence(X)
 

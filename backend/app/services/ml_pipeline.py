@@ -82,31 +82,54 @@ class MLPipeline:
         return [ind for ind, _ in counts.most_common(top_n)]
 
     def prepare_training_data(
-        self, start_date: str, end_date: str
+        self, start_date: str, end_date: str, max_stocks: int = 500
     ) -> tuple[np.ndarray, np.ndarray, list[str]]:
         """Build training dataset from granular factors for ALL stocks with price data.
 
         Target: average of cross-sectional rank percentiles of forward 5d, 10d, 20d returns.
         Multi-horizon average reduces single-period noise and produces more stable rankings.
 
-        Optimizations:
-        - One bulk DB query for all price data (not per-stock)
-        - Forward returns computed in-memory from pre-loaded prices
-        - Bi-weekly snapshots to balance sample count vs computation
-        - Industry one-hot encoding for top sectors
+        max_stocks: limit number of stocks to sample for training (memory-constrained servers).
+                    Stocks are selected by liquidity (highest average turnover).
         """
         db = self._get_db()
 
         # Get ALL stocks with price data
-        quote_codes = sorted(
+        all_quote_codes = sorted(
             r[0] for r in db.query(DailyQuote.code).distinct().all()
         )
-        if not quote_codes:
+        if not all_quote_codes:
             raise ValueError("No stocks with price data")
+
+        logger.info(f"Total stocks with price data: {len(all_quote_codes)}")
+
+        # Sample top-N by liquidity to stay within memory budget
+        if max_stocks and len(all_quote_codes) > max_stocks:
+            from ..models.market import DailyQuote as DQ
+            recent_window = (
+                date.fromisoformat(end_date) - timedelta(days=60)
+            ).isoformat()
+            liquidity = (
+                db.query(DQ.code, func.avg(DQ.turnover).label("avg_turn"))
+                .filter(
+                    DQ.code.in_(all_quote_codes),
+                    DQ.trade_date >= recent_window,
+                    DQ.trade_date <= end_date,
+                )
+                .group_by(DQ.code)
+                .order_by(func.avg(DQ.turnover).desc())
+                .limit(max_stocks)
+                .all()
+            )
+            quote_codes = sorted(r[0] for r in liquidity)
+            logger.info(f"Sampled {len(quote_codes)}/{len(all_quote_codes)} stocks by liquidity "
+                        f"(avg turnover range: {liquidity[-1][1]:.2f}% ~ {liquidity[0][1]:.2f}%)")
+        else:
+            quote_codes = all_quote_codes
 
         logger.info(f"Training universe: {len(quote_codes)} stocks")
 
-        # Load ALL price data in one bulk query
+        # Load price data in bulk
         # Need: start_date - 1 year (for factor lookback) to end_date + 30 days (for forward return)
         data_start = (date.fromisoformat(start_date) - timedelta(days=400)).isoformat()
         data_end = (date.fromisoformat(end_date) + timedelta(days=40)).isoformat()
@@ -277,7 +300,7 @@ class MLPipeline:
 
     # ── Model training ─────────────────────────────────────────────
 
-    def train(self, start_date: str = "2024-01-01", end_date: str = "2026-05-01") -> dict:
+    def train(self, start_date: str = "2024-01-01", end_date: str = "2026-05-01", max_stocks: int = 500) -> dict:
         """Train LightGBM model with multi-horizon target and industry features.
 
         Uses lower learning rate + more trees for stable convergence,
@@ -285,7 +308,7 @@ class MLPipeline:
         """
         import lightgbm as lgb
 
-        X, y, feature_names = self.prepare_training_data(start_date, end_date)
+        X, y, feature_names = self.prepare_training_data(start_date, end_date, max_stocks=max_stocks)
 
         # Time-series split: last 20% for validation
         split = int(len(X) * 0.8)

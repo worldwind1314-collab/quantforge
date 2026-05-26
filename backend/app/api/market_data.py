@@ -393,3 +393,26 @@ def available_sources():
         "joinquant_available": orch.has_source("joinquant"),
         "akshare_available": True,  # always available
     }
+
+
+@router.post("/repair/pct_change")
+def repair_pct_change(db: Session = Depends(get_db)):
+    """Backfill null pct_change/change for existing daily quotes using close prices."""
+    from sqlalchemy import text
+
+    result = db.execute(text("""
+        WITH ordered AS (
+            SELECT id, code, trade_date, close,
+                   LAG(close) OVER (PARTITION BY code ORDER BY trade_date) AS prev_close
+            FROM daily_quotes
+            WHERE pct_change IS NULL
+        )
+        UPDATE daily_quotes dq
+        SET pct_change = ROUND((o.close - o.prev_close) / NULLIF(o.prev_close, 0) * 100, 4),
+            change = ROUND((o.close - o.prev_close)::numeric, 4)
+        FROM ordered o
+        WHERE dq.id = o.id AND o.prev_close IS NOT NULL AND o.prev_close > 0
+    """))
+    db.commit()
+    repaired = result.rowcount
+    return {"status": "ok", "repaired_rows": repaired}

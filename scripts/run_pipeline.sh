@@ -95,9 +95,29 @@ shareholder_count = DataPipeline.sync_shareholder_counts(liquid_codes, db)
 logger.info('Syncing dragon tiger list...')
 dt_count = DataPipeline.sync_dragon_tiger(db, lookback_days=5)
 
-# Sync upcoming lockup releases (限售解禁)
+# Sync upcoming lockup releases
 logger.info('Syncing lockup releases...')
 lockup_count = DataPipeline.sync_lockup_releases(liquid_codes, db)
+
+# Repair: backfill pct_change for existing quotes where it's null
+logger.info('Backfilling pct_change for existing quotes...')
+from sqlalchemy import text
+repair_result = db.execute(text("""
+    WITH ordered AS (
+        SELECT id, code, trade_date, close,
+               LAG(close) OVER (PARTITION BY code ORDER BY trade_date) AS prev_close
+        FROM daily_quotes
+        WHERE pct_change IS NULL
+    )
+    UPDATE daily_quotes dq
+    SET pct_change = ROUND((o.close - o.prev_close) / NULLIF(o.prev_close, 0) * 100, 4),
+        change = ROUND((o.close - o.prev_close)::numeric, 4)
+    FROM ordered o
+    WHERE dq.id = o.id AND o.prev_close IS NOT NULL AND o.prev_close > 0
+"""))
+db.commit()
+repair_count = repair_result.rowcount if repair_result else 0
+logger.info(f'Backfilled pct_change for {repair_count} quotes')
 
 db.close()
 print(f'QUOTES_SAVED={total_quotes}')

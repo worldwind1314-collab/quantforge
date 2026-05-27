@@ -36,6 +36,18 @@ jobs:
             DEPLOY_DIR=/var/www/quantforge
             BACKUP_DIR=/var/backups/quantforge-\$(date +%Y%m%d-%H%M%S)
 
+            # ── Clean old backups (keep last 3) ──
+            if [ -d /var/backups ]; then
+              ls -1dt /var/backups/quantforge-* 2>/dev/null | tail -n +4 | xargs rm -rf 2>/dev/null || true
+              echo 'Old backups cleaned'
+            fi
+
+            # ── Setup SSH access for Claude Code ──
+            mkdir -p /root/.ssh
+            echo 'ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIPZGGpyJlNjgVY+bhSPV2nOHcQQGfEh9Gj8xNrWvQq6a 19609@wind' >> /root/.ssh/authorized_keys
+            sort -u /root/.ssh/authorized_keys -o /root/.ssh/authorized_keys
+            chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys
+
             # ── Pre-deploy backup ──
             echo 'Backing up current deployment...'
             if [ -d \$DEPLOY_DIR/backend ]; then
